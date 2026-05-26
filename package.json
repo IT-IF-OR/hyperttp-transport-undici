@@ -1,0 +1,74 @@
+{
+  "name": "@hyperttp/transport-undici",
+  "version": "0.1.0",
+  "description": "High-performance, extensible HTTP client for undici",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./dist/package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "http",
+    "client",
+    "high-performance",
+    "undici",
+    "fetch"
+  ],
+  "author": "dirold2",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IT-IF-OR/hyperttp-transport-undici.git"
+  },
+  "peerDependencies": {
+    "typescript": "^6",
+    "@hyperttp/types": "^0.1.1"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@dirold2/dev-tools": "^1.0.16",
+    "@eslint/js": "^10.0.1",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^25.9.1",
+    "@vitest/coverage-v8": "^4.1.7",
+    "@vitest/ui": "^4.1.7",
+    "chalk": "^5.6.2",
+    "dotenv-cli": "^11.0.0",
+    "eslint": "^10.4.0",
+    "eslint-plugin-import": "^2.32.0",
+    "globals": "^17.6.0",
+    "jiti": "^2.7.0",
+    "prettier": "3.8.3",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.60.0",
+    "vitest": "^4.1.7"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint 'src/**/*.{ts,js}'",
+    "format": "prettier --write .",
+    "build": "tsc && d-build",
+    "dist": "d-dist",
+    "deploy": "npm run typecheck && npm run build && npm run dist",
+    "publish": "d-publish",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "dependencies": {
+    "undici": "^8.3.0"
+  }
+}
