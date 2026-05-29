@@ -36,35 +36,6 @@ const AUTH_HEADERS_TO_DROP_ON_CROSS_ORIGIN_REDIRECT = new Set([
   "cookie2",
 ]);
 
-const MULTI_VALUE_HEADERS = new Set([
-  "set-cookie",
-  "accept",
-  "accept-encoding",
-  "accept-language",
-  "cache-control",
-  "pragma",
-  "vary",
-  "warning",
-  "www-authenticate",
-  "proxy-authenticate",
-]);
-
-const SINGLE_VALUE_HEADERS = new Set([
-  "content-type",
-  "content-length",
-  "content-encoding",
-  "content-disposition",
-  "host",
-  "authorization",
-  "proxy-authorization",
-  "user-agent",
-  "referer",
-  "origin",
-  "location",
-  "etag",
-  "last-modified",
-]);
-
 declare module "@hyperttp/types" {
   interface HttpClientOptions {
     /**
@@ -82,77 +53,6 @@ declare module "@hyperttp/types" {
 
 function toOrigin(url: string): string {
   return new URL(url, "http://localhost").origin;
-}
-
-function normalizeMethod(method: string): Method {
-  return method.toUpperCase() as Method;
-}
-
-export function normalizeHeaders(headers: unknown): Record<string, string> {
-  const out: Record<string, string> = Object.create(null);
-
-  if (!headers) return out;
-
-  const appendHeader = (key: string, rawValue: unknown): void => {
-    const lower = key.toLowerCase();
-
-    if (!lower) return;
-    if (rawValue === undefined || rawValue === null) return;
-
-    const value = typeof rawValue === "string" ? rawValue : String(rawValue);
-
-    if (SINGLE_VALUE_HEADERS.has(lower)) {
-      out[lower] = value;
-      return;
-    }
-
-    const existing = out[lower];
-
-    if (existing === undefined) {
-      out[lower] = value;
-      return;
-    }
-
-    if (lower === "cookie" || lower === "cookie2") {
-      out[lower] = `${existing}; ${value}`;
-      return;
-    }
-
-    if (lower === "set-cookie") {
-      out[lower] = `${existing}\n${value}`;
-      return;
-    }
-
-    if (MULTI_VALUE_HEADERS.has(lower)) {
-      out[lower] = `${existing}, ${value}`;
-      return;
-    }
-
-    out[lower] = value;
-  };
-
-  if (Array.isArray(headers)) {
-    for (let i = 0; i < headers.length; i += 2) {
-      const key = headers[i];
-      const value = headers[i + 1];
-      if (typeof key !== "string" || !key) continue;
-      appendHeader(key, value);
-    }
-    return out;
-  }
-
-  const headerObj = headers as Record<string, string | string[] | undefined>;
-
-  for (const [key, val] of Object.entries(headerObj)) {
-    if (val === undefined) continue;
-    if (Array.isArray(val)) {
-      for (const item of val) appendHeader(key, item);
-    } else {
-      appendHeader(key, val);
-    }
-  }
-
-  return out;
 }
 
 export function isRedirect(status: number): boolean {
@@ -463,7 +363,7 @@ export class UndiciDispatchHandler implements Dispatcher.DispatchHandler {
     _statusMessage?: string,
   ): void {
     this.statusCode = statusCode;
-    this.headers = normalizeHeaders(headers);
+    this.headers = headers as Record<string, string>;
   }
 
   onResponseData(
@@ -580,8 +480,8 @@ export class UndiciTransport implements HyperTransport {
   public async execute(req: TransportRequest): Promise<TransportResponse> {
     return this.executeWithPolicy({
       url: req.url,
-      method: normalizeMethod(req.method),
-      headers: normalizeHeaders(req.headers),
+      method: req.method,
+      headers: req.headers,
       body: req.body,
       signal: req.signal,
     });
@@ -591,8 +491,8 @@ export class UndiciTransport implements HyperTransport {
     req: InternalRequest,
   ): Promise<TransportResponse> {
     let currentUrl = req.url;
-    let currentMethod = normalizeMethod(req.method);
-    let currentHeaders = normalizeHeaders(req.headers);
+    let currentMethod = req.method;
+    let currentHeaders = req.headers;
     let currentBody =
       currentMethod === "GET" || currentMethod === "HEAD"
         ? undefined
@@ -752,15 +652,13 @@ export class UndiciTransport implements HyperTransport {
       throw abortError;
     }
 
-    const normalizedHeaders = normalizeHeaders(req.headers);
-
     return new Promise<DispatchResult>((resolve, reject) => {
       try {
         pool.dispatch(
           {
             path: fullUrl.pathname + fullUrl.search,
             method: req.method as Method,
-            headers: normalizedHeaders,
+            headers: req.headers,
             body,
           },
           new UndiciDispatchHandler(
