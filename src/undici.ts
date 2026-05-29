@@ -9,6 +9,8 @@ import type {
   TransportResponsePayload,
 } from "@hyperttp/types";
 import type { DispatchResult, TransportConfig } from "./types/index.js";
+import { decodeBodyByEncoding } from "./utils/decompress.js";
+import { ReadableStream } from "stream/web";
 
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const DEFAULT_RETRY_STATUS_CODES = [502, 503, 504];
@@ -34,14 +36,43 @@ const AUTH_HEADERS_TO_DROP_ON_CROSS_ORIGIN_REDIRECT = new Set([
   "cookie2",
 ]);
 
-// Расширяем интерфейс опций для поддержки специфичных для Node/Undici параметров
+const MULTI_VALUE_HEADERS = new Set([
+  "set-cookie",
+  "accept",
+  "accept-encoding",
+  "accept-language",
+  "cache-control",
+  "pragma",
+  "vary",
+  "warning",
+  "www-authenticate",
+  "proxy-authenticate",
+]);
+
+const SINGLE_VALUE_HEADERS = new Set([
+  "content-type",
+  "content-length",
+  "content-encoding",
+  "content-disposition",
+  "host",
+  "authorization",
+  "proxy-authorization",
+  "user-agent",
+  "referer",
+  "origin",
+  "location",
+  "etag",
+  "last-modified",
+]);
+
 declare module "@hyperttp/types" {
   interface HttpClientOptions {
     /**
      * @ru Базовый URL для резолва относительных путей запросов.
      * @en Base URL used to resolve relative request paths.
      */
-    baseUrl?: string; /**
+    baseUrl?: string;
+    /**
      * @ru Экземпляр диспетчера Undici (Pool, Agent, Client) для низкоуровневой настройки сетевого пула.
      * @en An Undici dispatcher instance (Pool, Agent, or Client) for low-level network pool tuning.
      */
@@ -64,10 +95,17 @@ export function normalizeHeaders(headers: unknown): Record<string, string> {
 
   const appendHeader = (key: string, rawValue: unknown): void => {
     const lower = key.toLowerCase();
+
     if (!lower) return;
     if (rawValue === undefined || rawValue === null) return;
 
     const value = typeof rawValue === "string" ? rawValue : String(rawValue);
+
+    if (SINGLE_VALUE_HEADERS.has(lower)) {
+      out[lower] = value;
+      return;
+    }
+
     const existing = out[lower];
 
     if (existing === undefined) {
@@ -75,10 +113,22 @@ export function normalizeHeaders(headers: unknown): Record<string, string> {
       return;
     }
 
-    out[lower] =
-      lower === "set-cookie"
-        ? `${existing}\n${value}`
-        : `${existing}, ${value}`;
+    if (lower === "cookie" || lower === "cookie2") {
+      out[lower] = `${existing}; ${value}`;
+      return;
+    }
+
+    if (lower === "set-cookie") {
+      out[lower] = `${existing}\n${value}`;
+      return;
+    }
+
+    if (MULTI_VALUE_HEADERS.has(lower)) {
+      out[lower] = `${existing}, ${value}`;
+      return;
+    }
+
+    out[lower] = value;
   };
 
   if (Array.isArray(headers)) {
@@ -123,7 +173,6 @@ export function shouldRetry(
 
 export function calcDelay(attempt: number, retryOptions: RetryOptions): number {
   const { baseDelay = 1000, maxDelay = 10000, jitter = true } = retryOptions;
-
   const base = Math.min(baseDelay * 2 ** attempt, maxDelay);
   return jitter ? base * (0.75 + Math.random() * 0.5) : base;
 }
@@ -138,9 +187,7 @@ function isReadableStreamLike(value: unknown): boolean {
 
 function isAsyncIterable(value: unknown): boolean {
   if (value == null || typeof value !== "object") return false;
-
   const asyncIterator = Reflect.get(value as object, Symbol.asyncIterator);
-
   return typeof asyncIterator === "function";
 }
 
@@ -202,7 +249,7 @@ export async function drainBody(body: unknown): Promise<void> {
       (stream.destroy as () => void)();
     }
   } catch {
-    // ignore disposal noise
+    //
   }
 }
 
@@ -323,31 +370,43 @@ class UndiciTransportResponse implements TransportResponse {
   private _cachedText?: string;
   private _cachedJson?: unknown;
   private _cachedJsonReady = false;
+  private _cachedWebStream?: TransportResponsePayload;
 
   constructor(result: DispatchResult) {
     this.status = result.status;
     this.headers = result.headers;
     this.url = result.url;
-    this._rawBody = result.body;
-
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(result.body);
-        controller.close();
-      },
-    });
+    this._rawBody = decodeBodyByEncoding(result.body, result.headers);
 
     this.text = this.text.bind(this);
     this.json = this.json.bind(this);
     this.dump = this.dump.bind(this);
 
-    const bodyPayload = stream as unknown as TransportResponsePayload;
-    bodyPayload!.dump = this.dump.bind(this);
+    const stream = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        controller.enqueue(
+          new Uint8Array(
+            this._rawBody.buffer,
+            this._rawBody.byteOffset,
+            this._rawBody.byteLength,
+          ),
+        );
+        controller.close();
+      },
+    });
 
+    const bodyPayload = stream as unknown as TransportResponsePayload;
+
+    Object.defineProperty(bodyPayload as object, "dump", {
+      value: this.dump.bind(this),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
+
+    this._cachedWebStream = bodyPayload;
     this.body = bodyPayload;
-  } /**
-   * В Web Streams API для прекращения чтения потока используется .cancel()
-   */
+  }
 
   public async dump(): Promise<void> {
     if (this.body && typeof this.body.cancel === "function") {
@@ -414,14 +473,13 @@ export class UndiciDispatchHandler implements Dispatcher.DispatchHandler {
     if (this.signal?.aborted) {
       const abortError = new Error("The operation was aborted.");
       abortError.name = "AbortError";
-
       controller.abort(abortError);
-
       return false;
     }
 
-    this.chunks.push(Buffer.from(chunk));
-
+    this.chunks.push(
+      Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength),
+    );
     return true;
   }
 
@@ -478,6 +536,7 @@ export class UndiciTransport implements HyperTransport {
   public config: TransportConfig;
   private readonly pool: Dispatcher;
   private readonly isExternal: boolean;
+  private readonly pools = new Map<string, Pool>();
 
   constructor(config: TransportConfig) {
     this.config = config;
@@ -522,7 +581,7 @@ export class UndiciTransport implements HyperTransport {
     return this.executeWithPolicy({
       url: req.url,
       method: normalizeMethod(req.method),
-      headers: { ...req.headers }, // Защита от мутаций оригинального объекта
+      headers: normalizeHeaders(req.headers),
       body: req.body,
       signal: req.signal,
     });
@@ -533,11 +592,14 @@ export class UndiciTransport implements HyperTransport {
   ): Promise<TransportResponse> {
     let currentUrl = req.url;
     let currentMethod = normalizeMethod(req.method);
-    let currentHeaders = { ...req.headers };
-    let currentBody = req.body;
+    let currentHeaders = normalizeHeaders(req.headers);
+    let currentBody =
+      currentMethod === "GET" || currentMethod === "HEAD"
+        ? undefined
+        : req.body;
 
     let redirects = 0;
-    let attempt = 0; // Один общий таймаут на весь запрос, включая редиректы и ретраи
+    let attempt = 0;
 
     const { signal, cancelTimer, cleanup, isTimeoutAbort } = combineSignal(
       req.signal,
@@ -665,19 +727,24 @@ export class UndiciTransport implements HyperTransport {
     }
   }
 
+  private getPool(origin: string): Pool {
+    const existing = this.pools.get(origin);
+    if (existing) return existing;
+
+    const pool = new Pool(origin, {
+      connections: this.config.network?.maxConcurrent ?? 500,
+      pipelining: this.config.network?.pipelining ?? 8,
+      keepAliveTimeout: this.config.network?.keepAliveTimeout ?? 30000,
+    });
+
+    this.pools.set(origin, pool);
+    return pool;
+  }
+
   private async dispatchOnce(req: InternalRequest): Promise<DispatchResult> {
     const fullUrl = new URL(req.url, this.baseUrl);
-
-    const body = (req.body ??
-      null) as unknown as Dispatcher.DispatchOptions["body"];
-
-    const dispatchOptions: Dispatcher.DispatchOptions = {
-      origin: fullUrl.origin,
-      path: fullUrl.pathname + fullUrl.search,
-      method: req.method as Method,
-      headers: req.headers,
-      body,
-    };
+    const body = (req.body ?? null) as Dispatcher.DispatchOptions["body"];
+    const pool = this.isExternal ? this.pool : this.getPool(fullUrl.origin);
 
     if (req.signal?.aborted) {
       const abortError = new Error("The operation was aborted.");
@@ -685,10 +752,17 @@ export class UndiciTransport implements HyperTransport {
       throw abortError;
     }
 
+    const normalizedHeaders = normalizeHeaders(req.headers);
+
     return new Promise<DispatchResult>((resolve, reject) => {
       try {
-        this.pool.dispatch(
-          dispatchOptions,
+        pool.dispatch(
+          {
+            path: fullUrl.pathname + fullUrl.search,
+            method: req.method as Method,
+            headers: normalizedHeaders,
+            body,
+          },
           new UndiciDispatchHandler(
             resolve,
             reject,
