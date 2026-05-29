@@ -1,8 +1,8 @@
 import { Pool, Dispatcher } from "undici";
-import { Readable } from "node:stream";
 import type {
   HyperTransport,
   InternalRequest,
+  Method,
   RetryOptions,
   TransportRequest,
   TransportResponse,
@@ -20,6 +20,20 @@ const RETRYABLE_ERROR_CODES = new Set([
   "UND_ERR_SOCKET",
 ]);
 
+const IDENTITY_HEADERS_TO_DROP_ON_BODYLESS_REDIRECT = new Set([
+  "content-type",
+  "content-length",
+  "transfer-encoding",
+  "expect",
+]);
+
+const AUTH_HEADERS_TO_DROP_ON_CROSS_ORIGIN_REDIRECT = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "cookie2",
+]);
+
 // Расширяем интерфейс опций для поддержки специфичных для Node/Undici параметров
 declare module "@hyperttp/types" {
   interface HttpClientOptions {
@@ -27,8 +41,7 @@ declare module "@hyperttp/types" {
      * @ru Базовый URL для резолва относительных путей запросов.
      * @en Base URL used to resolve relative request paths.
      */
-    baseUrl?: string;
-    /**
+    baseUrl?: string; /**
      * @ru Экземпляр диспетчера Undici (Pool, Agent, Client) для низкоуровневой настройки сетевого пула.
      * @en An Undici dispatcher instance (Pool, Agent, or Client) for low-level network pool tuning.
      */
@@ -36,20 +49,44 @@ declare module "@hyperttp/types" {
   }
 }
 
+function toOrigin(url: string): string {
+  return new URL(url, "http://localhost").origin;
+}
+
+function normalizeMethod(method: string): Method {
+  return method.toUpperCase() as Method;
+}
+
 export function normalizeHeaders(headers: unknown): Record<string, string> {
   const out: Record<string, string> = Object.create(null);
 
   if (!headers) return out;
 
+  const appendHeader = (key: string, rawValue: unknown): void => {
+    const lower = key.toLowerCase();
+    if (!lower) return;
+    if (rawValue === undefined || rawValue === null) return;
+
+    const value = typeof rawValue === "string" ? rawValue : String(rawValue);
+    const existing = out[lower];
+
+    if (existing === undefined) {
+      out[lower] = value;
+      return;
+    }
+
+    out[lower] =
+      lower === "set-cookie"
+        ? `${existing}\n${value}`
+        : `${existing}, ${value}`;
+  };
+
   if (Array.isArray(headers)) {
     for (let i = 0; i < headers.length; i += 2) {
-      const key = (headers[i] as string).toLowerCase();
-      if (!key) continue;
-
+      const key = headers[i];
       const value = headers[i + 1];
-      if (value === undefined || value === null) continue;
-
-      out[key] = typeof value === "string" ? value : String(value);
+      if (typeof key !== "string" || !key) continue;
+      appendHeader(key, value);
     }
     return out;
   }
@@ -58,13 +95,10 @@ export function normalizeHeaders(headers: unknown): Record<string, string> {
 
   for (const [key, val] of Object.entries(headerObj)) {
     if (val === undefined) continue;
-
-    const lower = key.toLowerCase();
-
     if (Array.isArray(val)) {
-      out[lower] = lower === "set-cookie" ? val.join("\n") : val.join(", ");
+      for (const item of val) appendHeader(key, item);
     } else {
-      out[lower] = String(val);
+      appendHeader(key, val);
     }
   }
 
@@ -94,6 +128,55 @@ export function calcDelay(attempt: number, retryOptions: RetryOptions): number {
   return jitter ? base * (0.75 + Math.random() * 0.5) : base;
 }
 
+function isReadableStreamLike(value: unknown): boolean {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    typeof (value as Record<string, unknown>).getReader === "function"
+  );
+}
+
+function isAsyncIterable(value: unknown): boolean {
+  if (value == null || typeof value !== "object") return false;
+
+  const asyncIterator = Reflect.get(value as object, Symbol.asyncIterator);
+
+  return typeof asyncIterator === "function";
+}
+
+function isReplayableBody(body: unknown): boolean {
+  if (body === undefined || body === null) return true;
+  if (typeof body === "string") return true;
+  if (body instanceof Buffer) return true;
+  if (body instanceof Uint8Array) return true;
+  if (body instanceof ArrayBuffer) return true;
+  if (ArrayBuffer.isView(body)) return true;
+  if (
+    typeof URLSearchParams !== "undefined" &&
+    body instanceof URLSearchParams
+  ) {
+    return true;
+  }
+  if (typeof Blob !== "undefined" && body instanceof Blob) return true;
+  if (typeof FormData !== "undefined" && body instanceof FormData) return true;
+
+  if (isReadableStreamLike(body)) return false;
+  if (isAsyncIterable(body)) return false;
+  if (typeof body === "function") return false;
+
+  return true;
+}
+
+function isBodyAllowedForRetry(method: Method, body: unknown): boolean {
+  if (body === undefined || body === null) return true;
+  return isReplayableBody(body) || method === "GET" || method === "HEAD";
+}
+
+function isBodyAllowedForRedirect(method: Method, body: unknown): boolean {
+  if (body === undefined || body === null) return true;
+  return isReplayableBody(body) || method === "GET" || method === "HEAD";
+}
+
 export async function drainBody(body: unknown): Promise<void> {
   if (!body || typeof body !== "object") return;
 
@@ -102,6 +185,11 @@ export async function drainBody(body: unknown): Promise<void> {
 
     if (typeof stream.dump === "function") {
       await (stream.dump as () => Promise<void>)();
+      return;
+    }
+
+    if (typeof stream.cancel === "function") {
+      await (stream.cancel as () => Promise<void>)();
       return;
     }
 
@@ -118,8 +206,39 @@ export async function drainBody(body: unknown): Promise<void> {
   }
 }
 
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+
+    const onAbort = (): void => {
+      cleanup();
+      const err = new Error("The operation was aborted.");
+      err.name = "AbortError";
+      reject(err);
+    };
+
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        cleanup();
+        const err = new Error("The operation was aborted.");
+        err.name = "AbortError";
+        reject(err);
+        return;
+      }
+
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
 }
 
 export function combineSignal(
@@ -128,12 +247,14 @@ export function combineSignal(
 ): {
   signal?: AbortSignal;
   cancelTimer: () => void;
+  cleanup: () => void;
   isTimeoutAbort: () => boolean;
 } {
   if (timeoutMs <= 0) {
     return {
       signal,
       cancelTimer: () => {},
+      cleanup: () => {},
       isTimeoutAbort: () => false,
     };
   }
@@ -141,23 +262,53 @@ export function combineSignal(
   const timeoutController = new AbortController();
   const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
 
-  let combinedSignal: AbortSignal;
-  if (signal) {
-    if (typeof AbortSignal.any === "function") {
-      combinedSignal = AbortSignal.any([signal, timeoutController.signal]);
-    } else {
-      signal.addEventListener("abort", () => timeoutController.abort(), {
-        once: true,
-      });
-      combinedSignal = timeoutController.signal;
-    }
-  } else {
-    combinedSignal = timeoutController.signal;
+  if (!signal) {
+    return {
+      signal: timeoutController.signal,
+      cancelTimer: () => clearTimeout(timer),
+      cleanup: () => clearTimeout(timer),
+      isTimeoutAbort: () => timeoutController.signal.aborted,
+    };
   }
 
+  if (typeof AbortSignal.any === "function") {
+    const combined = AbortSignal.any([signal, timeoutController.signal]);
+    return {
+      signal: combined,
+      cancelTimer: () => clearTimeout(timer),
+      cleanup: () => clearTimeout(timer),
+      isTimeoutAbort: () => timeoutController.signal.aborted,
+    };
+  }
+
+  const controller = new AbortController();
+
+  const abortFromUser = (): void => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+
+  const abortFromTimeout = (): void => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+
+  if (signal.aborted) {
+    abortFromUser();
+  } else {
+    signal.addEventListener("abort", abortFromUser, { once: true });
+  }
+
+  timeoutController.signal.addEventListener("abort", abortFromTimeout, {
+    once: true,
+  });
+
   return {
-    signal: combinedSignal,
+    signal: controller.signal,
     cancelTimer: () => clearTimeout(timer),
+    cleanup: () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abortFromUser);
+      timeoutController.signal.removeEventListener("abort", abortFromTimeout);
+    },
     isTimeoutAbort: () => timeoutController.signal.aborted,
   };
 }
@@ -167,7 +318,6 @@ class UndiciTransportResponse implements TransportResponse {
   public readonly headers: Record<string, string>;
   public readonly url: string;
   public readonly body: TransportResponsePayload;
-  public readonly baseUrl: string;
 
   private readonly _rawBody: Buffer;
   private _cachedText?: string;
@@ -179,10 +329,30 @@ class UndiciTransportResponse implements TransportResponse {
     this.headers = result.headers;
     this.url = result.url;
     this._rawBody = result.body;
-    this.body = Readable.from([
-      result.body,
-    ]) as unknown as TransportResponsePayload;
-    this.baseUrl = result.url;
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(result.body);
+        controller.close();
+      },
+    });
+
+    this.text = this.text.bind(this);
+    this.json = this.json.bind(this);
+    this.dump = this.dump.bind(this);
+
+    const bodyPayload = stream as unknown as TransportResponsePayload;
+    bodyPayload!.dump = this.dump.bind(this);
+
+    this.body = bodyPayload;
+  } /**
+   * В Web Streams API для прекращения чтения потока используется .cancel()
+   */
+
+  public async dump(): Promise<void> {
+    if (this.body && typeof this.body.cancel === "function") {
+      await this.body.cancel();
+    }
   }
 
   public async text(): Promise<string> {
@@ -222,12 +392,12 @@ export class UndiciDispatchHandler implements Dispatcher.DispatchHandler {
     private readonly signal?: AbortSignal,
   ) {}
 
-  public onRequestStart(
+  onRequestStart(
     _controller: Dispatcher.DispatchController,
     _context: unknown,
   ): void {}
 
-  public onResponseStart(
+  onResponseStart(
     _controller: Dispatcher.DispatchController,
     statusCode: number,
     headers: unknown,
@@ -237,25 +407,29 @@ export class UndiciDispatchHandler implements Dispatcher.DispatchHandler {
     this.headers = normalizeHeaders(headers);
   }
 
-  public onResponseData(
+  onResponseData(
     controller: Dispatcher.DispatchController,
     chunk: Buffer,
-  ): void {
+  ): boolean {
     if (this.signal?.aborted) {
       const abortError = new Error("The operation was aborted.");
       abortError.name = "AbortError";
+
       controller.abort(abortError);
-      return;
+
+      return false;
     }
-    this.chunks.push(chunk);
+
+    this.chunks.push(Buffer.from(chunk));
+
+    return true;
   }
 
-  public onResponseEnd(
+  onResponseEnd(
     _controller: Dispatcher.DispatchController,
-    _trailers: Record<string, string>,
+    _trailers: unknown,
   ): void {
-    const body =
-      this.chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(this.chunks);
+    const body = Buffer.concat(this.chunks);
 
     this.resolve({
       status: this.statusCode,
@@ -265,12 +439,39 @@ export class UndiciDispatchHandler implements Dispatcher.DispatchHandler {
     });
   }
 
-  public onResponseError(
+  onResponseError(
     _controller: Dispatcher.DispatchController,
     error: Error,
   ): void {
     this.reject(error);
   }
+}
+
+function stripHeadersOnRedirect(
+  headers: Record<string, string | string[]>,
+  bodyless: boolean,
+  crossOrigin: boolean,
+): Record<string, string> {
+  const next: Record<string, string> = Object.create(null);
+
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+
+    if (bodyless && IDENTITY_HEADERS_TO_DROP_ON_BODYLESS_REDIRECT.has(lower)) {
+      continue;
+    }
+
+    if (
+      crossOrigin &&
+      AUTH_HEADERS_TO_DROP_ON_CROSS_ORIGIN_REDIRECT.has(lower)
+    ) {
+      continue;
+    }
+
+    next[lower] = Array.isArray(value) ? value.join(", ") : value;
+  }
+
+  return next;
 }
 
 export class UndiciTransport implements HyperTransport {
@@ -282,9 +483,11 @@ export class UndiciTransport implements HyperTransport {
     this.config = config;
     this.isExternal = config.dispatcher !== undefined;
 
+    const origin = toOrigin(this.baseUrl);
+
     this.pool =
       config.dispatcher ??
-      new Pool(this.baseUrl, {
+      new Pool(origin, {
         connections: config.network?.maxConcurrent ?? 500,
         pipelining: config.network?.pipelining ?? 8,
         keepAliveTimeout: config.network?.keepAliveTimeout ?? 30000,
@@ -318,7 +521,7 @@ export class UndiciTransport implements HyperTransport {
   public async execute(req: TransportRequest): Promise<TransportResponse> {
     return this.executeWithPolicy({
       url: req.url,
-      method: req.method,
+      method: normalizeMethod(req.method),
       headers: { ...req.headers }, // Защита от мутаций оригинального объекта
       body: req.body,
       signal: req.signal,
@@ -329,120 +532,151 @@ export class UndiciTransport implements HyperTransport {
     req: InternalRequest,
   ): Promise<TransportResponse> {
     let currentUrl = req.url;
-    let currentMethod = req.method;
-    let currentHeaders = req.headers;
+    let currentMethod = normalizeMethod(req.method);
+    let currentHeaders = { ...req.headers };
     let currentBody = req.body;
 
     let redirects = 0;
-    let attempt = 0;
+    let attempt = 0; // Один общий таймаут на весь запрос, включая редиректы и ретраи
 
-    while (true) {
-      const { signal, cancelTimer, isTimeoutAbort } = combineSignal(
-        req.signal,
-        this.timeout,
-      );
+    const { signal, cancelTimer, cleanup, isTimeoutAbort } = combineSignal(
+      req.signal,
+      this.timeout,
+    );
 
-      try {
-        const result = await this.dispatchOnce({
-          ...req,
-          url: currentUrl,
-          method: currentMethod,
-          headers: currentHeaders,
-          body: currentBody,
-          signal,
-        });
+    try {
+      while (true) {
+        const startedAt = Date.now();
 
-        if (this.followRedirects && isRedirect(result.status)) {
-          if (redirects >= this.maxRedirects) {
-            await drainBody(result.body);
-            throw new Error("Too many redirects");
+        try {
+          const result = await this.dispatchOnce({
+            ...req,
+            url: currentUrl,
+            method: currentMethod,
+            headers: currentHeaders,
+            body: currentBody,
+            signal,
+          });
+
+          if (this.followRedirects && isRedirect(result.status)) {
+            if (redirects >= this.maxRedirects) {
+              throw new Error("Too many redirects");
+            }
+
+            const location = result.headers.location;
+            if (location) {
+              const nextUrl = new URL(location, result.url).toString();
+              const nextOrigin = new URL(nextUrl).origin;
+              const currentOrigin = new URL(result.url).origin;
+
+              let nextMethod = currentMethod;
+              let nextBody = currentBody;
+              let bodylessRedirect = false;
+
+              if (
+                result.status === 303 ||
+                ((result.status === 301 || result.status === 302) &&
+                  currentMethod === "POST")
+              ) {
+                nextMethod = "GET";
+                nextBody = undefined;
+                bodylessRedirect = true;
+              }
+
+              if (nextMethod !== "GET" && nextMethod !== "HEAD") {
+                if (!isBodyAllowedForRedirect(nextMethod, nextBody)) {
+                  throw new Error(
+                    "Cannot resend non-replayable request body after redirect",
+                  );
+                }
+              }
+
+              currentUrl = nextUrl;
+              currentMethod = nextMethod;
+              currentBody = nextBody;
+
+              currentHeaders = stripHeadersOnRedirect(
+                currentHeaders,
+                bodylessRedirect ||
+                  nextMethod === "GET" ||
+                  nextMethod === "HEAD",
+                nextOrigin !== currentOrigin,
+              );
+
+              redirects += 1;
+              await drainBody(result.body);
+              continue;
+            }
           }
 
-          const location = result.headers.location;
-          if (location) {
-            await drainBody(result.body);
-
-            const nextUrl = new URL(location, result.url).toString();
-            let nextMethod = currentMethod;
-
+          if (shouldRetry(result.status, this.retryOptions)) {
             if (
-              result.status === 303 ||
-              ((result.status === 301 || result.status === 302) &&
-                currentMethod === "POST")
+              attempt < this.maxRetries &&
+              isBodyAllowedForRetry(currentMethod, currentBody)
             ) {
-              nextMethod = "GET";
+              await drainBody(result.body);
+
+              const delay = calcDelay(attempt, this.retryOptions);
+              const elapsed = Date.now() - startedAt;
+              const remainingDelay = Math.max(0, delay - elapsed);
+
+              await sleep(remainingDelay, signal);
+              attempt += 1;
+              continue;
             }
-
-            currentUrl = nextUrl;
-            currentMethod = nextMethod;
-            currentBody = nextMethod === "GET" ? undefined : currentBody;
-
-            if (nextMethod === "GET") {
-              const nextHeaders = { ...currentHeaders };
-              delete nextHeaders["content-type"];
-              delete nextHeaders["content-length"];
-              currentHeaders = nextHeaders;
-            }
-
-            redirects += 1;
-            continue;
           }
-        }
 
-        if (shouldRetry(result.status, this.retryOptions)) {
-          if (attempt < this.maxRetries) {
-            await drainBody(result.body);
-            await sleep(calcDelay(attempt, this.retryOptions));
+          return this.createResponse(result);
+        } catch (err) {
+          if (this.isAbortError(err)) {
+            if (req.signal?.aborted) {
+              throw err;
+            }
+
+            if (isTimeoutAbort()) {
+              throw new Error(`Request timeout after ${this.timeout}ms`, {
+                cause: err,
+              });
+            }
+
+            throw new Error("Transport closed or aborted", { cause: err });
+          }
+
+          const code = this.getErrorCode(err);
+
+          if (
+            attempt < this.maxRetries &&
+            code &&
+            RETRYABLE_ERROR_CODES.has(code) &&
+            isBodyAllowedForRetry(currentMethod, currentBody)
+          ) {
+            const delay = calcDelay(attempt, this.retryOptions);
+            await sleep(delay, signal);
             attempt += 1;
             continue;
           }
+
+          throw err;
         }
-
-        return this.createResponse(result);
-      } catch (err) {
-        if (this.isAbortError(err)) {
-          if (req.signal?.aborted) {
-            throw err;
-          }
-
-          if (isTimeoutAbort()) {
-            throw new Error(`Request timeout after ${this.timeout}ms`, {
-              cause: err,
-            });
-          }
-
-          throw new Error("Transport closed or aborted", { cause: err });
-        }
-
-        const code = this.getErrorCode(err);
-
-        if (
-          attempt < this.maxRetries &&
-          code &&
-          RETRYABLE_ERROR_CODES.has(code)
-        ) {
-          await sleep(calcDelay(attempt, this.retryOptions));
-          attempt += 1;
-          continue;
-        }
-
-        throw err;
-      } finally {
-        cancelTimer();
       }
+    } finally {
+      cancelTimer();
+      cleanup();
     }
   }
 
   private async dispatchOnce(req: InternalRequest): Promise<DispatchResult> {
     const fullUrl = new URL(req.url, this.baseUrl);
 
-    const dispatchOptions = {
+    const body = (req.body ??
+      null) as unknown as Dispatcher.DispatchOptions["body"];
+
+    const dispatchOptions: Dispatcher.DispatchOptions = {
       origin: fullUrl.origin,
       path: fullUrl.pathname + fullUrl.search,
-      method: req.method,
+      method: req.method as Method,
       headers: req.headers,
-      body: req.body,
-      signal: req.signal,
+      body,
     };
 
     if (req.signal?.aborted) {
@@ -452,17 +686,19 @@ export class UndiciTransport implements HyperTransport {
     }
 
     return new Promise<DispatchResult>((resolve, reject) => {
-      // Полностью полагаемся на внутренний механизм отмены undici через dispatchOptions.signal.
-      // Это предотвращает двойной reject и утечки памяти.
-      this.pool.dispatch(
-        dispatchOptions,
-        new UndiciDispatchHandler(
-          resolve,
-          reject,
-          fullUrl.toString(),
-          req.signal,
-        ),
-      );
+      try {
+        this.pool.dispatch(
+          dispatchOptions,
+          new UndiciDispatchHandler(
+            resolve,
+            reject,
+            fullUrl.toString(),
+            req.signal,
+          ),
+        );
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -472,19 +708,29 @@ export class UndiciTransport implements HyperTransport {
 
   private isAbortError(err: unknown): boolean {
     if (!err || typeof err !== "object") return false;
+
     const name = (err as { name?: unknown }).name;
     const code = (err as { code?: unknown }).code;
+    const cause = (err as { cause?: unknown }).cause;
+
     return (
       name === "AbortError" ||
       code === "UND_ERR_HEADERS_TIMEOUT" ||
-      code === "UND_ERR_BODY_TIMEOUT"
+      code === "UND_ERR_BODY_TIMEOUT" ||
+      (cause !== undefined && this.isAbortError(cause))
     );
   }
 
   private getErrorCode(err: unknown): string | undefined {
     if (!err || typeof err !== "object") return undefined;
+
     const code = (err as { code?: unknown }).code;
-    return typeof code === "string" ? code : undefined;
+    if (typeof code === "string") return code;
+
+    const cause = (err as { cause?: unknown }).cause;
+    if (cause !== undefined) return this.getErrorCode(cause);
+
+    return undefined;
   }
 
   public async close(): Promise<void> {

@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/transport-undici",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "description": "High-performance, extensible HTTP client for undici",
   "type": "module",
   "exports": {
@@ -28,8 +28,7 @@
     "url": "git+https://github.com/IT-IF-OR/hyperttp-transport-undici.git"
   },
   "peerDependencies": {
-    "typescript": "^6",
-    "@hyperttp/types": "^0.1.1"
+    "@hyperttp/types": "^0.1.5"
   },
   "peerDependenciesMeta": {
     "typescript": {
