@@ -1,672 +1,264 @@
 import { Pool, Dispatcher } from "undici";
+import { ReadableStream } from "stream/web";
 import type {
   HyperTransport,
-  InternalRequest,
-  Method,
-  RetryOptions,
   TransportRequest,
   TransportResponse,
   TransportResponsePayload,
 } from "@hyperttp/types";
-import type { DispatchResult, TransportConfig } from "./types/index.js";
-import { decodeBodyByEncoding } from "./utils/decompress.js";
-import { ReadableStream } from "stream/web";
+import {
+  abortError,
+  createPoolOptions,
+  fastParseUrl,
+  normalizeHeaders,
+} from "./utils/helpers.js";
+import type { PoolOptions, UndiciTransportConfig } from "./types/index.js";
 
-const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
-const DEFAULT_RETRY_STATUS_CODES = [502, 503, 504];
-const RETRYABLE_ERROR_CODES = new Set([
-  "ECONNREFUSED",
-  "ETIMEDOUT",
-  "ECONNRESET",
-  "EPIPE",
-  "UND_ERR_SOCKET",
-]);
+const DEFAULT_BASE_URL = "http://localhost:3000";
+const FALLBACK_ORIGIN = "http://localhost";
 
-const IDENTITY_HEADERS_TO_DROP_ON_BODYLESS_REDIRECT = new Set([
-  "content-type",
-  "content-length",
-  "transfer-encoding",
-  "expect",
-]);
-
-const AUTH_HEADERS_TO_DROP_ON_CROSS_ORIGIN_REDIRECT = new Set([
-  "authorization",
-  "proxy-authorization",
-  "cookie",
-  "cookie2",
-]);
-
-declare module "@hyperttp/types" {
-  interface HttpClientOptions {
-    /**
-     * @ru Базовый URL для резолва относительных путей запросов.
-     * @en Base URL used to resolve relative request paths.
-     */
-    baseUrl?: string;
-    /**
-     * @ru Экземпляр диспетчера Undici (Pool, Agent, Client) для низкоуровневой настройки сетевого пула.
-     * @en An Undici dispatcher instance (Pool, Agent, or Client) for low-level network pool tuning.
-     */
-    dispatcher?: Dispatcher;
-  }
-}
-
-function toOrigin(url: string): string {
-  return new URL(url, "http://localhost").origin;
-}
-
-export function isRedirect(status: number): boolean {
-  return REDIRECT_STATUS_CODES.has(status);
-}
-
-export function shouldRetry(
-  status: number,
-  retryOptions: RetryOptions,
-): boolean {
-  const codes = retryOptions.retryStatusCodes;
-  if (codes && codes.length > 0) {
-    return codes.includes(status);
-  }
-
-  return DEFAULT_RETRY_STATUS_CODES.includes(status);
-}
-
-export function calcDelay(attempt: number, retryOptions: RetryOptions): number {
-  const { baseDelay = 1000, maxDelay = 10000, jitter = true } = retryOptions;
-  const base = Math.min(baseDelay * 2 ** attempt, maxDelay);
-  return jitter ? base * (0.75 + Math.random() * 0.5) : base;
-}
-
-function isReadableStreamLike(value: unknown): boolean {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    typeof (value as Record<string, unknown>).getReader === "function"
-  );
-}
-
-function isAsyncIterable(value: unknown): boolean {
-  if (value == null || typeof value !== "object") return false;
-  const asyncIterator = Reflect.get(value as object, Symbol.asyncIterator);
-  return typeof asyncIterator === "function";
-}
-
-function isReplayableBody(body: unknown): boolean {
-  if (body === undefined || body === null) return true;
-  if (typeof body === "string") return true;
-  if (body instanceof Buffer) return true;
-  if (body instanceof Uint8Array) return true;
-  if (body instanceof ArrayBuffer) return true;
-  if (ArrayBuffer.isView(body)) return true;
-  if (
-    typeof URLSearchParams !== "undefined" &&
-    body instanceof URLSearchParams
+class DumpableReadableStream extends ReadableStream<Uint8Array> {
+  constructor(
+    underlyingSource: any,
+    private readonly onDump: () => Promise<void>,
   ) {
-    return true;
-  }
-  if (typeof Blob !== "undefined" && body instanceof Blob) return true;
-  if (typeof FormData !== "undefined" && body instanceof FormData) return true;
-
-  if (isReadableStreamLike(body)) return false;
-  if (isAsyncIterable(body)) return false;
-  if (typeof body === "function") return false;
-
-  return true;
-}
-
-function isBodyAllowedForRetry(method: Method, body: unknown): boolean {
-  if (body === undefined || body === null) return true;
-  return isReplayableBody(body) || method === "GET" || method === "HEAD";
-}
-
-function isBodyAllowedForRedirect(method: Method, body: unknown): boolean {
-  if (body === undefined || body === null) return true;
-  return isReplayableBody(body) || method === "GET" || method === "HEAD";
-}
-
-export async function drainBody(body: unknown): Promise<void> {
-  if (!body || typeof body !== "object") return;
-
-  try {
-    const stream = body as Record<string, unknown>;
-
-    if (typeof stream.dump === "function") {
-      await (stream.dump as () => Promise<void>)();
-      return;
-    }
-
-    if (typeof stream.cancel === "function") {
-      await (stream.cancel as () => Promise<void>)();
-      return;
-    }
-
-    if (typeof stream.resume === "function") {
-      (stream.resume as () => void)();
-      return;
-    }
-
-    if (typeof stream.destroy === "function") {
-      (stream.destroy as () => void)();
-    }
-  } catch {
-    //
-  }
-}
-
-export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0) return Promise.resolve();
-
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-
-    const onAbort = (): void => {
-      cleanup();
-      const err = new Error("The operation was aborted.");
-      err.name = "AbortError";
-      reject(err);
-    };
-
-    const cleanup = (): void => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-    };
-
-    if (signal) {
-      if (signal.aborted) {
-        cleanup();
-        const err = new Error("The operation was aborted.");
-        err.name = "AbortError";
-        reject(err);
-        return;
-      }
-
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-  });
-}
-
-export function combineSignal(
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-): {
-  signal?: AbortSignal;
-  cancelTimer: () => void;
-  cleanup: () => void;
-  isTimeoutAbort: () => boolean;
-} {
-  if (timeoutMs <= 0) {
-    return {
-      signal,
-      cancelTimer: () => {},
-      cleanup: () => {},
-      isTimeoutAbort: () => false,
-    };
+    super(underlyingSource);
   }
 
-  const timeoutController = new AbortController();
-  const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
-
-  if (!signal) {
-    return {
-      signal: timeoutController.signal,
-      cancelTimer: () => clearTimeout(timer),
-      cleanup: () => clearTimeout(timer),
-      isTimeoutAbort: () => timeoutController.signal.aborted,
-    };
-  }
-
-  if (typeof AbortSignal.any === "function") {
-    const combined = AbortSignal.any([signal, timeoutController.signal]);
-    return {
-      signal: combined,
-      cancelTimer: () => clearTimeout(timer),
-      cleanup: () => clearTimeout(timer),
-      isTimeoutAbort: () => timeoutController.signal.aborted,
-    };
-  }
-
-  const controller = new AbortController();
-
-  const abortFromUser = (): void => {
-    if (!controller.signal.aborted) controller.abort();
-  };
-
-  const abortFromTimeout = (): void => {
-    if (!controller.signal.aborted) controller.abort();
-  };
-
-  if (signal.aborted) {
-    abortFromUser();
-  } else {
-    signal.addEventListener("abort", abortFromUser, { once: true });
-  }
-
-  timeoutController.signal.addEventListener("abort", abortFromTimeout, {
-    once: true,
-  });
-
-  return {
-    signal: controller.signal,
-    cancelTimer: () => clearTimeout(timer),
-    cleanup: () => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", abortFromUser);
-      timeoutController.signal.removeEventListener("abort", abortFromTimeout);
-    },
-    isTimeoutAbort: () => timeoutController.signal.aborted,
-  };
-}
-
-class UndiciTransportResponse implements TransportResponse {
-  public readonly status: number;
-  public readonly headers: Record<string, string>;
-  public readonly url: string;
-  public readonly body: TransportResponsePayload;
-
-  private readonly _rawBody: Buffer;
-  private _cachedText?: string;
-  private _cachedJson?: unknown;
-  private _cachedJsonReady = false;
-  private _cachedWebStream?: TransportResponsePayload;
-
-  constructor(result: DispatchResult) {
-    this.status = result.status;
-    this.headers = result.headers;
-    this.url = result.url;
-    this._rawBody = decodeBodyByEncoding(result.body, result.headers);
-
-    this.text = this.text.bind(this);
-    this.json = this.json.bind(this);
-    this.dump = this.dump.bind(this);
-
-    const stream = new ReadableStream<Uint8Array>({
-      start: (controller) => {
-        controller.enqueue(
-          new Uint8Array(
-            this._rawBody.buffer,
-            this._rawBody.byteOffset,
-            this._rawBody.byteLength,
-          ),
-        );
-        controller.close();
-      },
-    });
-
-    const bodyPayload = stream as unknown as TransportResponsePayload;
-
-    Object.defineProperty(bodyPayload as object, "dump", {
-      value: this.dump.bind(this),
-      writable: false,
-      enumerable: false,
-      configurable: true,
-    });
-
-    this._cachedWebStream = bodyPayload;
-    this.body = bodyPayload;
-  }
-
-  public async dump(): Promise<void> {
-    if (this.body && typeof this.body.cancel === "function") {
-      await this.body.cancel();
-    }
-  }
-
-  public async text(): Promise<string> {
-    if (this._cachedText === undefined) {
-      this._cachedText = this._rawBody.toString("utf-8");
-    }
-    return this._cachedText;
-  }
-
-  public async json<T>(): Promise<T> {
-    if (this._cachedJsonReady) {
-      return this._cachedJson as T;
-    }
-
-    const text = await this.text();
-    if (!text.trim()) {
-      this._cachedJson = null;
-      this._cachedJsonReady = true;
-      return null as unknown as T;
-    }
-
-    this._cachedJson = JSON.parse(text);
-    this._cachedJsonReady = true;
-    return this._cachedJson as T;
+  dump(): Promise<void> {
+    return this.onDump();
   }
 }
 
 export class UndiciDispatchHandler implements Dispatcher.DispatchHandler {
-  private statusCode = 200;
-  private headers: Record<string, string> = Object.create(null);
-  private chunks: Buffer[] = [];
+  private undiciController: Dispatcher.DispatchController | null = null;
+  private streamController: ReadableStreamDefaultController<Uint8Array> | null =
+    null;
+  private onAbortRef?: () => void;
+  private isResolved = false;
+  private finished = false;
 
   constructor(
-    private readonly resolve: (value: DispatchResult) => void,
+    private readonly resolve: (value: TransportResponse) => void,
     private readonly reject: (reason: Error) => void,
     private readonly url: string,
     private readonly signal?: AbortSignal,
   ) {}
 
-  onRequestStart(
-    _controller: Dispatcher.DispatchController,
-    _context: unknown,
-  ): void {}
+  onRequestStart(controller: Dispatcher.DispatchController): void {
+    this.undiciController = controller;
+
+    const signal = this.signal;
+    if (!signal) return;
+
+    if (signal.aborted) {
+      controller.abort(abortError(signal.reason));
+      return;
+    }
+
+    this.onAbortRef = () => {
+      const err = abortError(signal.reason);
+      controller.abort(err);
+
+      const stream = this.streamController;
+      if (stream) {
+        try {
+          stream.error(err);
+        } catch {}
+      }
+    };
+
+    signal.addEventListener("abort", this.onAbortRef, { once: true });
+  }
+
+  private readonly dumpBody = async (): Promise<void> => {
+    this.cleanup();
+
+    const controller = this.undiciController;
+    if (controller) {
+      controller.abort(new Error("Stream dumped"));
+    }
+
+    const streamCtrl = this.streamController;
+    if (streamCtrl && !this.finished) {
+      this.finished = true;
+      try {
+        streamCtrl.close();
+      } catch {}
+    }
+
+    this.release();
+  };
 
   onResponseStart(
     _controller: Dispatcher.DispatchController,
     statusCode: number,
     headers: unknown,
-    _statusMessage?: string,
   ): void {
-    this.statusCode = statusCode;
-    this.headers = headers as Record<string, string>;
+    this.isResolved = true;
+
+    const normalizedHeaders = normalizeHeaders(headers);
+
+    const stream = new DumpableReadableStream(
+      {
+        start: (ctrl: ReadableStreamDefaultController<Uint8Array>) => {
+          this.streamController = ctrl;
+
+          const signal = this.signal;
+          if (signal?.aborted) {
+            const err = abortError(signal.reason);
+            try {
+              ctrl.error(err);
+            } catch {}
+          }
+        },
+        cancel: (reason: unknown) => {
+          this.cleanup();
+
+          const controller = this.undiciController;
+          if (controller) {
+            controller.abort(
+              reason instanceof Error ? reason : abortError(reason),
+            );
+          }
+
+          this.release();
+        },
+      },
+      this.dumpBody,
+    );
+
+    this.resolve({
+      status: statusCode,
+      headers: normalizedHeaders,
+      url: this.url,
+      body: stream as unknown as TransportResponsePayload,
+    });
   }
 
   onResponseData(
-    controller: Dispatcher.DispatchController,
+    _controller: Dispatcher.DispatchController,
     chunk: Buffer,
   ): boolean {
-    if (this.signal?.aborted) {
-      const abortError = new Error("The operation was aborted.");
-      abortError.name = "AbortError";
-      controller.abort(abortError);
+    if (this.signal?.aborted) return false;
+
+    const ctrl = this.streamController;
+    if (!ctrl) return true;
+
+    try {
+      ctrl.enqueue(chunk);
+      return true;
+    } catch {
       return false;
     }
-
-    this.chunks.push(
-      Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength),
-    );
-    return true;
   }
 
-  onResponseEnd(
-    _controller: Dispatcher.DispatchController,
-    _trailers: unknown,
-  ): void {
-    const body = Buffer.concat(this.chunks);
+  onResponseEnd(): void {
+    if (this.finished) return;
+    this.finished = true;
 
-    this.resolve({
-      status: this.statusCode,
-      headers: this.headers,
-      body,
-      url: this.url,
-    });
+    this.cleanup();
+
+    const ctrl = this.streamController;
+    if (ctrl) {
+      try {
+        ctrl.close();
+      } catch {}
+    }
+
+    this.release();
   }
 
   onResponseError(
     _controller: Dispatcher.DispatchController,
     error: Error,
   ): void {
-    this.reject(error);
-  }
-}
+    if (this.finished) return;
+    this.finished = true;
 
-function stripHeadersOnRedirect(
-  headers: Record<string, string | string[]>,
-  bodyless: boolean,
-  crossOrigin: boolean,
-): Record<string, string> {
-  const next: Record<string, string> = Object.create(null);
+    this.cleanup();
 
-  for (const [key, value] of Object.entries(headers)) {
-    const lower = key.toLowerCase();
-
-    if (bodyless && IDENTITY_HEADERS_TO_DROP_ON_BODYLESS_REDIRECT.has(lower)) {
-      continue;
+    if (!this.isResolved) {
+      this.reject(error);
+      this.release();
+      return;
     }
 
-    if (
-      crossOrigin &&
-      AUTH_HEADERS_TO_DROP_ON_CROSS_ORIGIN_REDIRECT.has(lower)
-    ) {
-      continue;
+    const ctrl = this.streamController;
+    if (ctrl) {
+      try {
+        ctrl.error(error);
+      } catch {}
     }
 
-    next[lower] = Array.isArray(value) ? value.join(", ") : value;
+    this.release();
   }
 
-  return next;
+  private cleanup(): void {
+    const signal = this.signal;
+    const abortRef = this.onAbortRef;
+
+    if (signal && abortRef) {
+      signal.removeEventListener("abort", abortRef);
+    }
+
+    this.onAbortRef = undefined;
+  }
+
+  private release(): void {
+    this.undiciController = null;
+    this.streamController = null;
+    this.onAbortRef = undefined;
+  }
 }
 
 export class UndiciTransport implements HyperTransport {
-  public config: TransportConfig;
+  public config: UndiciTransportConfig;
   private readonly pool: Dispatcher;
   private readonly isExternal: boolean;
   private readonly pools = new Map<string, Pool>();
+  private readonly poolOptions: PoolOptions;
 
-  constructor(config: TransportConfig) {
+  constructor(config: UndiciTransportConfig) {
     this.config = config;
     this.isExternal = config.dispatcher !== undefined;
+    this.poolOptions = createPoolOptions(config);
 
-    const origin = toOrigin(this.baseUrl);
+    const parsed = fastParseUrl(this.baseUrl, FALLBACK_ORIGIN);
 
     this.pool =
       config.dispatcher ??
-      new Pool(origin, {
-        connections: config.network?.maxConcurrent ?? 500,
-        pipelining: config.network?.pipelining ?? 8,
-        keepAliveTimeout: config.network?.keepAliveTimeout ?? 30000,
+      new Pool(parsed.origin, {
+        connections: this.poolOptions.connections,
+        pipelining: this.poolOptions.pipelining,
+        keepAliveTimeout: this.poolOptions.keepAliveTimeout,
       });
   }
 
   private get baseUrl(): string {
-    return this.config.baseUrl ?? "http://localhost:3000";
-  }
-
-  private get timeout(): number {
-    return this.config.network?.timeout ?? 30000;
-  }
-
-  private get followRedirects(): boolean {
-    return this.config.network?.followRedirects ?? true;
-  }
-
-  private get maxRedirects(): number {
-    return this.config.network?.maxRedirects ?? 5;
-  }
-
-  private get retryOptions(): RetryOptions {
-    return this.config.retry ?? {};
-  }
-
-  private get maxRetries(): number {
-    return this.config.retry?.maxRetries ?? 3;
+    return this.config.baseUrl ?? DEFAULT_BASE_URL;
   }
 
   public async execute(req: TransportRequest): Promise<TransportResponse> {
-    return this.executeWithPolicy({
-      url: req.url,
-      method: req.method,
-      headers: req.headers,
-      body: req.body,
-      signal: req.signal,
-    });
-  }
-
-  private async executeWithPolicy(
-    req: InternalRequest,
-  ): Promise<TransportResponse> {
-    let currentUrl = req.url;
-    let currentMethod = req.method;
-    let currentHeaders = req.headers;
-    let currentBody =
-      currentMethod === "GET" || currentMethod === "HEAD"
-        ? undefined
-        : req.body;
-
-    let redirects = 0;
-    let attempt = 0;
-
-    const { signal, cancelTimer, cleanup, isTimeoutAbort } = combineSignal(
-      req.signal,
-      this.timeout,
-    );
-
-    try {
-      while (true) {
-        const startedAt = Date.now();
-
-        try {
-          const result = await this.dispatchOnce({
-            ...req,
-            url: currentUrl,
-            method: currentMethod,
-            headers: currentHeaders,
-            body: currentBody,
-            signal,
-          });
-
-          if (this.followRedirects && isRedirect(result.status)) {
-            if (redirects >= this.maxRedirects) {
-              throw new Error("Too many redirects");
-            }
-
-            const location = result.headers.location;
-            if (location) {
-              const nextUrl = new URL(location, result.url).toString();
-              const nextOrigin = new URL(nextUrl).origin;
-              const currentOrigin = new URL(result.url).origin;
-
-              let nextMethod = currentMethod;
-              let nextBody = currentBody;
-              let bodylessRedirect = false;
-
-              if (
-                result.status === 303 ||
-                ((result.status === 301 || result.status === 302) &&
-                  currentMethod === "POST")
-              ) {
-                nextMethod = "GET";
-                nextBody = undefined;
-                bodylessRedirect = true;
-              }
-
-              if (nextMethod !== "GET" && nextMethod !== "HEAD") {
-                if (!isBodyAllowedForRedirect(nextMethod, nextBody)) {
-                  throw new Error(
-                    "Cannot resend non-replayable request body after redirect",
-                  );
-                }
-              }
-
-              currentUrl = nextUrl;
-              currentMethod = nextMethod;
-              currentBody = nextBody;
-
-              currentHeaders = stripHeadersOnRedirect(
-                currentHeaders,
-                bodylessRedirect ||
-                  nextMethod === "GET" ||
-                  nextMethod === "HEAD",
-                nextOrigin !== currentOrigin,
-              );
-
-              redirects += 1;
-              await drainBody(result.body);
-              continue;
-            }
-          }
-
-          if (shouldRetry(result.status, this.retryOptions)) {
-            if (
-              attempt < this.maxRetries &&
-              isBodyAllowedForRetry(currentMethod, currentBody)
-            ) {
-              await drainBody(result.body);
-
-              const delay = calcDelay(attempt, this.retryOptions);
-              const elapsed = Date.now() - startedAt;
-              const remainingDelay = Math.max(0, delay - elapsed);
-
-              await sleep(remainingDelay, signal);
-              attempt += 1;
-              continue;
-            }
-          }
-
-          return this.createResponse(result);
-        } catch (err) {
-          if (this.isAbortError(err)) {
-            if (req.signal?.aborted) {
-              throw err;
-            }
-
-            if (isTimeoutAbort()) {
-              throw new Error(`Request timeout after ${this.timeout}ms`, {
-                cause: err,
-              });
-            }
-
-            throw new Error("Transport closed or aborted", { cause: err });
-          }
-
-          const code = this.getErrorCode(err);
-
-          if (
-            attempt < this.maxRetries &&
-            code &&
-            RETRYABLE_ERROR_CODES.has(code) &&
-            isBodyAllowedForRetry(currentMethod, currentBody)
-          ) {
-            const delay = calcDelay(attempt, this.retryOptions);
-            await sleep(delay, signal);
-            attempt += 1;
-            continue;
-          }
-
-          throw err;
-        }
-      }
-    } finally {
-      cancelTimer();
-      cleanup();
+    const signal = req.signal;
+    if (signal?.aborted) {
+      throw abortError(signal.reason);
     }
-  }
 
-  private getPool(origin: string): Pool {
-    const existing = this.pools.get(origin);
-    if (existing) return existing;
-
-    const pool = new Pool(origin, {
-      connections: this.config.network?.maxConcurrent ?? 500,
-      pipelining: this.config.network?.pipelining ?? 8,
-      keepAliveTimeout: this.config.network?.keepAliveTimeout ?? 30000,
-    });
-
-    this.pools.set(origin, pool);
-    return pool;
-  }
-
-  private async dispatchOnce(req: InternalRequest): Promise<DispatchResult> {
-    const fullUrl = new URL(req.url, this.baseUrl);
+    const parsed = fastParseUrl(req.url, this.baseUrl);
     const body = (req.body ?? null) as Dispatcher.DispatchOptions["body"];
-    const pool = this.isExternal ? this.pool : this.getPool(fullUrl.origin);
+    const pool = this.isExternal ? this.pool : this.getPool(parsed.origin);
 
-    if (req.signal?.aborted) {
-      const abortError = new Error("The operation was aborted.");
-      abortError.name = "AbortError";
-      throw abortError;
-    }
-
-    return new Promise<DispatchResult>((resolve, reject) => {
+    return new Promise<TransportResponse>((resolve, reject) => {
       try {
         pool.dispatch(
           {
-            path: fullUrl.pathname + fullUrl.search,
-            method: req.method as Method,
-            headers: req.headers,
+            path: parsed.path,
+            method: req.method,
+            headers: req.headers as Dispatcher.DispatchOptions["headers"],
             body,
           },
-          new UndiciDispatchHandler(
-            resolve,
-            reject,
-            fullUrl.toString(),
-            req.signal,
-          ),
+          new UndiciDispatchHandler(resolve, reject, parsed.fullUrl, signal),
         );
       } catch (error) {
         reject(error instanceof Error ? error : new Error(String(error)));
@@ -674,44 +266,37 @@ export class UndiciTransport implements HyperTransport {
     });
   }
 
-  private createResponse(result: DispatchResult): TransportResponse {
-    return new UndiciTransportResponse(result);
-  }
+  private getPool(origin: string): Pool {
+    const existing = this.pools.get(origin);
+    if (existing) return existing;
 
-  private isAbortError(err: unknown): boolean {
-    if (!err || typeof err !== "object") return false;
+    const created = new Pool(origin, {
+      connections: this.poolOptions.connections,
+      pipelining: this.poolOptions.pipelining,
+      keepAliveTimeout: this.poolOptions.keepAliveTimeout,
+    });
 
-    const name = (err as { name?: unknown }).name;
-    const code = (err as { code?: unknown }).code;
-    const cause = (err as { cause?: unknown }).cause;
-
-    return (
-      name === "AbortError" ||
-      code === "UND_ERR_HEADERS_TIMEOUT" ||
-      code === "UND_ERR_BODY_TIMEOUT" ||
-      (cause !== undefined && this.isAbortError(cause))
-    );
-  }
-
-  private getErrorCode(err: unknown): string | undefined {
-    if (!err || typeof err !== "object") return undefined;
-
-    const code = (err as { code?: unknown }).code;
-    if (typeof code === "string") return code;
-
-    const cause = (err as { cause?: unknown }).cause;
-    if (cause !== undefined) return this.getErrorCode(cause);
-
-    return undefined;
+    this.pools.set(origin, created);
+    return created;
   }
 
   public async close(): Promise<void> {
     if (this.isExternal) return;
-    await this.pool.close();
+
+    const promises: Promise<void>[] = [this.pool.close()];
+    for (const p of this.pools.values()) promises.push(p.close());
+
+    this.pools.clear();
+    await Promise.all(promises);
   }
 
   public async destroy(): Promise<void> {
     if (this.isExternal) return;
-    await this.pool.destroy();
+
+    const promises: Promise<void>[] = [this.pool.destroy()];
+    for (const p of this.pools.values()) promises.push(p.destroy());
+
+    this.pools.clear();
+    await Promise.all(promises);
   }
 }

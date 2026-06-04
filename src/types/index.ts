@@ -1,4 +1,6 @@
 import type { HttpClientOptions, RetryOptions } from "@hyperttp/types";
+import type { ReadableStream } from "stream/web";
+import type { Dispatcher } from "undici";
 
 /**
  * @ru Конфигурация сетевого транспорта, расширяющая базовые опции клиента.
@@ -81,7 +83,7 @@ export type DispatchResult = {
    * @ru Сырой буфер бинарных данных тела ответа.
    * @en Raw binary buffer containing the fully aggregated response payload.
    */
-  body: Buffer;
+  body: ReadableStream<Uint8Array>;
 
   /**
    * @ru Финальный абсолютный URL (с учетом возможных редиректов).
@@ -89,3 +91,19 @@ export type DispatchResult = {
    */
   url: string;
 };
+
+export interface PoolOptions {
+  connections: number;
+  pipelining: number;
+  keepAliveTimeout: number;
+}
+
+export interface UndiciTransportConfig {
+  baseUrl?: string;
+  dispatcher?: Dispatcher;
+  network?: {
+    maxConcurrent?: number;
+    pipelining?: number;
+    keepAliveTimeout?: number;
+  };
+}
