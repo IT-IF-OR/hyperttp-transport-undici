@@ -56,11 +56,7 @@ export function fastParseUrl(url: string, defaultBase: string) {
   };
 }
 
-function setHeader(
-  bag: Record<string, string | string[]>,
-  key: string,
-  value: string,
-): void {
+function setHeader(bag: Record<string, string | string[]>, key: string, value: string): void {
   const existing = bag[key];
   if (existing === undefined) {
     bag[key] = value;
@@ -89,11 +85,7 @@ export function normalizeHeaders(
       const rawValue = headers[i + 1];
       if (rawValue == null) continue;
 
-      setHeader(
-        bag,
-        key.toLowerCase(),
-        typeof rawValue === "string" ? rawValue : String(rawValue),
-      );
+      setHeader(bag, key.toLowerCase(), typeof rawValue === "string" ? rawValue : String(rawValue));
     }
     return bag;
   }

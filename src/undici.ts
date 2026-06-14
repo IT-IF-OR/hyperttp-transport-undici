@@ -1,39 +1,21 @@
 import { Pool, Dispatcher } from "undici";
-import { ReadableStream } from "stream/web";
 import type {
   HyperTransport,
   TransportRequest,
   TransportResponse,
   TransportResponsePayload,
 } from "@hyperttp/types";
-import {
-  abortError,
-  createPoolOptions,
-  fastParseUrl,
-  normalizeHeaders,
-} from "./utils/helpers.js";
+import { abortError, createPoolOptions, fastParseUrl, normalizeHeaders } from "./utils/helpers.js";
 import type { PoolOptions, UndiciTransportConfig } from "./types/index.js";
+import type { TransportStreamExtensions } from "@hyperttp/types";
+import { createDecompressStream } from "./utils/decompress.js";
 
 const DEFAULT_BASE_URL = "http://localhost:3000";
 const FALLBACK_ORIGIN = "http://localhost";
 
-class DumpableReadableStream extends ReadableStream<Uint8Array> {
-  constructor(
-    underlyingSource: any,
-    private readonly onDump: () => Promise<void>,
-  ) {
-    super(underlyingSource);
-  }
-
-  dump(): Promise<void> {
-    return this.onDump();
-  }
-}
-
 export class UndiciDispatchHandler implements Dispatcher.DispatchHandler {
   private undiciController: Dispatcher.DispatchController | null = null;
-  private streamController: ReadableStreamDefaultController<Uint8Array> | null =
-    null;
+  private streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
   private onAbortRef?: () => void;
   private isResolved = false;
   private finished = false;
@@ -96,50 +78,67 @@ export class UndiciDispatchHandler implements Dispatcher.DispatchHandler {
     headers: unknown,
   ): void {
     this.isResolved = true;
-
     const normalizedHeaders = normalizeHeaders(headers);
 
-    const stream = new DumpableReadableStream(
-      {
-        start: (ctrl: ReadableStreamDefaultController<Uint8Array>) => {
-          this.streamController = ctrl;
+    const rawStream = new ReadableStream<Uint8Array>({
+      start: (ctrl) => {
+        this.streamController = ctrl;
+        const signal = this.signal;
+        if (signal?.aborted) {
+          const err = abortError(signal.reason);
+          try {
+            ctrl.error(err);
+          } catch {}
+        }
+      },
+      cancel: (reason) => {
+        this.cleanup();
+        const controller = this.undiciController;
+        if (controller) {
+          controller.abort(reason instanceof Error ? reason : abortError(reason));
+        }
+        this.release();
+      },
+    });
 
-          const signal = this.signal;
-          if (signal?.aborted) {
-            const err = abortError(signal.reason);
+    const ce = normalizedHeaders["content-encoding"] || normalizedHeaders["Content-Encoding"];
+    const encoding = Array.isArray(ce) ? ce[0] : ce;
+
+    if (encoding) {
+      createDecompressStream(rawStream, encoding)
+        .then((decompressedStream) => {
+          delete normalizedHeaders["content-encoding"];
+          delete normalizedHeaders["Content-Encoding"];
+
+          this.resolve({
+            status: statusCode,
+            headers: normalizedHeaders,
+            url: this.url,
+            body: decompressedStream as unknown as TransportResponsePayload,
+          });
+        })
+        .catch((err) => {
+          if (this.streamController) {
             try {
-              ctrl.error(err);
+              this.streamController.error(err);
             } catch {}
           }
-        },
-        cancel: (reason: unknown) => {
-          this.cleanup();
+          this.reject(err);
+        });
+    } else {
+      const payload = rawStream as ReadableStream<Uint8Array> & TransportStreamExtensions;
+      payload.dump = this.dumpBody;
 
-          const controller = this.undiciController;
-          if (controller) {
-            controller.abort(
-              reason instanceof Error ? reason : abortError(reason),
-            );
-          }
-
-          this.release();
-        },
-      },
-      this.dumpBody,
-    );
-
-    this.resolve({
-      status: statusCode,
-      headers: normalizedHeaders,
-      url: this.url,
-      body: stream as unknown as TransportResponsePayload,
-    });
+      this.resolve({
+        status: statusCode,
+        headers: normalizedHeaders,
+        url: this.url,
+        body: payload as unknown as TransportResponsePayload,
+      });
+    }
   }
 
-  onResponseData(
-    _controller: Dispatcher.DispatchController,
-    chunk: Buffer,
-  ): boolean {
+  onResponseData(_controller: Dispatcher.DispatchController, chunk: Buffer): boolean {
     if (this.signal?.aborted) return false;
 
     const ctrl = this.streamController;
@@ -169,10 +168,7 @@ export class UndiciDispatchHandler implements Dispatcher.DispatchHandler {
     this.release();
   }
 
-  onResponseError(
-    _controller: Dispatcher.DispatchController,
-    error: Error,
-  ): void {
+  onResponseError(_controller: Dispatcher.DispatchController, error: Error): void {
     if (this.finished) return;
     this.finished = true;
 
