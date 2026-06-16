@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/transport-undici",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "description": "High-performance, extensible HTTP client for undici",
   "type": "module",
   "exports": {
@@ -27,7 +27,7 @@
     "url": "git+https://github.com/IT-IF-OR/hyperttp-transport-undici.git"
   },
   "peerDependencies": {
-    "@hyperttp/types": "^0.2.1"
+    "@hyperttp/types": "^0.2.3"
   },
   "peerDependenciesMeta": {
     "typescript": {
@@ -37,17 +37,17 @@
   "devDependencies": {
     "@dirold2/dev-tools": "^1.0.16",
     "@types/node": "^25.9.3",
-    "@vitest/coverage-v8": "^4.1.8",
-    "@vitest/ui": "^4.1.8",
+    "@vitest/coverage-v8": "^4.1.9",
+    "@vitest/ui": "^4.1.9",
     "chalk": "^5.6.2",
     "dotenv-cli": "^11.0.0",
     "jiti": "^2.7.0",
-    "oxlint": "^1.69.0",
-    "oxfmt": "^0.54.0",
+    "oxlint": "^1.70.0",
+    "oxfmt": "^0.55.0",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.61.0",
-    "vitest": "^4.1.8"
+    "typescript-eslint": "^8.61.1",
+    "vitest": "^4.1.9"
   },
   "scripts": {
     "build": "tsc && d-build",
@@ -64,6 +64,6 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "undici": "^8.4.1"
+    "undici": "^8.5.0"
   }
 }

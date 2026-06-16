@@ -1,4 +1,4 @@
-import type { HttpClientOptions, RetryOptions } from "@hyperttp/types";
+import type { HttpClientOptions, RetryOptions, StealthOptions } from "@hyperttp/types";
 import type { ReadableStream } from "stream/web";
 import type { Dispatcher } from "undici";
 
@@ -12,6 +12,12 @@ export interface TransportConfig extends HttpClientOptions {
    * @en Retry policy behavior and strategy configurations.
    */
   retry?: RetryOptions;
+
+  /**
+   * @ru Параметры скрытности, эмуляции отпечатков TLS (JA3/JA4) и обхода систем DPI.
+   * @en Stealth options for TLS fingerprint emulation and DPI evasion strategies.
+   */
+  stealth?: StealthOptions;
 
   /**
    * @ru Низкоуровневые параметры тюнинга сетевых соединений сокетов.
@@ -96,14 +102,31 @@ export interface PoolOptions {
   connections: number;
   pipelining: number;
   keepAliveTimeout: number;
+  allowH2: boolean;
 }
 
+/**
+ * @ru Конфигурация транспорта на базе Undici с поддержкой stealth-сессий.
+ * @en Undici-based transport configuration with integrated stealth session support.
+ */
 export interface UndiciTransportConfig {
   baseUrl?: string;
   dispatcher?: Dispatcher;
+
+  /**
+   * @ru Глобальный профиль маскировки для всех создаваемых пулов соединений.
+   * @en Global stealth profile applied to all generated connection pools.
+   */
+  stealth?: StealthOptions;
+
   network?: {
     maxConcurrent?: number;
     pipelining?: number;
     keepAliveTimeout?: number;
+    /**
+     * @ru Проброс флага валидации SSL для консистентности TLS-стека.
+     * @en SSL validation flag forwarding for TLS stack consistency.
+     */
+    rejectUnauthorized?: boolean;
   };
 }
