@@ -46,6 +46,10 @@ export function fastParseUrl(
 
   if (firstChar === 47) {
     // '/'
+    if (url.charCodeAt(1) === 47) {
+      // '//' - protocol-relative
+      return fallbackParse("https:" + url, defaultBase);
+    }
     const hashIdx = url.indexOf("#");
     const cleanPath = hashIdx === -1 ? url : url.slice(0, hashIdx);
     return {
@@ -53,11 +57,6 @@ export function fastParseUrl(
       path: cleanPath,
       fullUrl: defaultBase + cleanPath,
     };
-  }
-
-  if (firstChar === 47 && url.charCodeAt(1) === 47) {
-    // '//'
-    return fallbackParse("https:" + url, defaultBase);
   }
 
   const schemeIdx = url.indexOf("://");
@@ -150,6 +149,24 @@ function fallbackParse(
 }
 
 /**
+ * @ru Быстрая нормализация заголовков ответа: переводит ключи в нижний регистр.
+ * Значения не меняет (могут быть string | string[]).
+ * @en Fast response header normalization: lowercases all keys.
+ * Values are kept as-is (string | string[]).
+ * @param headers - Response headers from undici.
+ * @returns Normalized headers with lowercase keys.
+ */
+export function fastNormalizeResponseHeaders(
+  headers: Record<string, string | string[]>,
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = Object.create(null);
+  for (const key in headers) {
+    out[key.toLowerCase()] = headers[key]!;
+  }
+  return out;
+}
+
+/**
  * @ru Нормализует заголовки, переводя все ключи в нижний регистр.
  * Поддерживает Headers, массив пар и Record.
  * Массивы значений объединяются через ", " (или "; " для cookie).
@@ -162,9 +179,8 @@ function fallbackParse(
 export function normalizeHeaders(headers: TransportRequest["headers"]): Record<string, string> {
   if (!headers) return Object.create(null);
 
-  const out: Record<string, string> = Object.create(null);
-
   if (headers instanceof Headers) {
+    const out: Record<string, string> = Object.create(null);
     headers.forEach((value, key) => {
       out[key.toLowerCase()] = value;
     });
@@ -172,6 +188,7 @@ export function normalizeHeaders(headers: TransportRequest["headers"]): Record<s
   }
 
   if (Array.isArray(headers)) {
+    const out: Record<string, string> = Object.create(null);
     for (let i = 0; i < headers.length; i++) {
       const pair = headers[i] as unknown as [string, string] | undefined;
       if (!pair) continue;
@@ -181,6 +198,17 @@ export function normalizeHeaders(headers: TransportRequest["headers"]): Record<s
   }
 
   const src = headers as Record<string, unknown>;
+
+  // Быстрый path: уже lowercase, без массивов — возвращаем как есть
+  let needsNormalize = false;
+  for (const key in src) {
+    if (key !== key.toLowerCase()) { needsNormalize = true; break; }
+    const v = src[key];
+    if (v == null || Array.isArray(v)) { needsNormalize = true; break; }
+  }
+  if (!needsNormalize) return src as Record<string, string>;
+
+  const out: Record<string, string> = Object.create(null);
   for (const key in src) {
     const value = src[key];
     if (value == null) continue;

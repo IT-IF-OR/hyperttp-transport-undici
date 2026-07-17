@@ -1,47 +1,8 @@
 import type { TransportStreamExtensions } from "@hyperttp/types";
-
-type StreamPayload = ReadableStream<Uint8Array> & TransportStreamExtensions;
-type BufferPayload = Uint8Array & TransportStreamExtensions;
-
-interface NodeReadableLike {
-  pipe<T extends NodeReadableLike>(writableStream: unknown): T;
-}
-
-interface NodeStreamModule {
-  Readable: {
-    fromWeb(stream: unknown, options?: unknown): NodeReadableLike;
-    toWeb(nodeStream: unknown): ReadableStream<Uint8Array>;
-  };
-}
-
-interface NodeZlibModule {
-  gunzipSync(buf: Uint8Array): Uint8Array;
-  inflateSync(buf: Uint8Array): Uint8Array;
-  brotliDecompressSync(buf: Uint8Array): Uint8Array;
-  createGunzip(): unknown;
-  createInflate(): unknown;
-  createBrotliDecompress(): unknown;
-}
+import { createGunzip, createInflate, createBrotliDecompress, gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
+import { Readable } from "node:stream";
 
 const NOOP_DUMP = async (): Promise<void> => {};
-
-let zlibModulePromise: Promise<NodeZlibModule> | null = null;
-let streamModulePromise: Promise<NodeStreamModule> | null = null;
-
-async function getZlibModule(): Promise<NodeZlibModule> {
-  if (!zlibModulePromise) {
-    // Используем нативный ESM импорт, так как в Node/Bun он работает из коробки
-    zlibModulePromise = import("node:zlib") as unknown as Promise<NodeZlibModule>;
-  }
-  return zlibModulePromise;
-}
-
-async function getStreamModule(): Promise<NodeStreamModule> {
-  if (!streamModulePromise) {
-    streamModulePromise = import("node:stream") as unknown as Promise<NodeStreamModule>;
-  }
-  return streamModulePromise;
-}
 
 function parseEncodings(encoding: string): string[] {
   const result: string[] = [];
@@ -61,14 +22,14 @@ function parseEncodings(encoding: string): string[] {
   return result;
 }
 
-function attachNoopDump(buffer: Uint8Array): BufferPayload {
-  const payload = buffer as BufferPayload;
+function attachNoopDump(buffer: Uint8Array): Uint8Array & TransportStreamExtensions {
+  const payload = buffer as Uint8Array & TransportStreamExtensions;
   payload.dump = NOOP_DUMP;
   return payload;
 }
 
-function attachStreamDump(stream: ReadableStream<Uint8Array>): StreamPayload {
-  const payload = stream as StreamPayload;
+function attachStreamDump(stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> & TransportStreamExtensions {
+  const payload = stream as ReadableStream<Uint8Array> & TransportStreamExtensions;
   payload.dump = async (): Promise<void> => {
     try {
       await payload.cancel();
@@ -96,24 +57,23 @@ async function decompressOnceWeb(input: Uint8Array, encoding: string): Promise<U
   return new Uint8Array(buf);
 }
 
-async function decompressOnceNode(input: Uint8Array, encoding: string): Promise<Uint8Array> {
+function decompressOnceNode(input: Uint8Array, encoding: string): Uint8Array {
   const enc = encoding.trim().toLowerCase();
-  const zlib = await getZlibModule();
 
   switch (enc) {
     case "gzip":
     case "x-gzip":
-      return zlib.gunzipSync(input);
+      return gunzipSync(input);
     case "deflate":
-      return zlib.inflateSync(input);
+      return inflateSync(input);
     case "br":
-      return zlib.brotliDecompressSync(input);
+      return brotliDecompressSync(input);
     default:
       return input;
   }
 }
 
-export async function decompressBuffer(body: Uint8Array, encoding: string): Promise<BufferPayload> {
+export async function decompressBuffer(body: Uint8Array, encoding: string): Promise<Uint8Array & TransportStreamExtensions> {
   let current: Uint8Array = body;
   const encodings = parseEncodings(encoding);
 
@@ -128,7 +88,7 @@ export async function decompressBuffer(body: Uint8Array, encoding: string): Prom
 
     if (enc === "br" || enc === "gzip" || enc === "deflate" || enc === "x-gzip") {
       try {
-        current = await decompressOnceNode(current, enc);
+        current = decompressOnceNode(current, enc);
       } catch {
         continue;
       }
@@ -137,10 +97,10 @@ export async function decompressBuffer(body: Uint8Array, encoding: string): Prom
   return attachNoopDump(current);
 }
 
-export async function createDecompressStream(
+export function createDecompressStream(
   body: ReadableStream<Uint8Array>,
   encoding: string,
-): Promise<StreamPayload> {
+): ReadableStream<Uint8Array> & TransportStreamExtensions {
   const encodings = parseEncodings(encoding);
   if (encodings.length === 0) return attachStreamDump(body);
 
@@ -160,21 +120,18 @@ export async function createDecompressStream(
       );
     } else {
       try {
-        const streamMod = await getStreamModule();
-        const zlibMod = await getZlibModule();
-
-        const nodeReadableStream = streamMod.Readable.fromWeb(current);
-        let transformer: NodeReadableLike = nodeReadableStream;
+        const nodeReadable = Readable.fromWeb(current as any);
+        let transformed = nodeReadable;
 
         if (isGzip) {
-          transformer = nodeReadableStream.pipe<NodeReadableLike>(zlibMod.createGunzip());
+          transformed = nodeReadable.pipe(createGunzip());
         } else if (isDeflate) {
-          transformer = nodeReadableStream.pipe<NodeReadableLike>(zlibMod.createInflate());
+          transformed = nodeReadable.pipe(createInflate());
         } else if (isBrotli) {
-          transformer = nodeReadableStream.pipe<NodeReadableLike>(zlibMod.createBrotliDecompress());
+          transformed = nodeReadable.pipe(createBrotliDecompress());
         }
 
-        current = streamMod.Readable.toWeb(transformer);
+        current = Readable.toWeb(transformed) as ReadableStream<Uint8Array>;
       } catch {
         continue;
       }
