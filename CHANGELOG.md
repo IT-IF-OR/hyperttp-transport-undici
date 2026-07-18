@@ -2,6 +2,19 @@
 
 All notable changes to `@hyperttp/transport-undici` will be documented in this file.
 
+## [0.2.5] - 2026-07-18
+
+### Added
+
+- Integrated `hcacher` as peer dependency for in-memory caching with TTL and LRU eviction.
+- Added `cookieStore`, `cookieStringCache`, and `responseCache` instances using `CacheManager`.
+- Added `cache` and `cookieCache` config options to `UndiciTransportConfig.network`.
+
+### Changed
+
+- Replaced manual `urlCache` (Map) with `CacheManager` from `hcacher`.
+- Simplified `parseUrlCached()` — eviction now handled automatically by `CacheManager`.
+
 ## [0.2.4] - 2026-07-18
 
 ### Fixed

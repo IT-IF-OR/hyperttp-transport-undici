@@ -18,13 +18,19 @@ ultra-low latency demands.
 
 ## 📊 Performance (Node.js v24)
 
-Benchmark results processing **20,000 requests** (Concurrency: 200) against a local JSON endpoint:
+Benchmark: **20,000 requests** · Concurrency: **200** · Duration: **60s** · Target: local JSON endpoint
 
-| Client                                        | Throughput (RPS) | Latency Avg | p50        | p99         | Peak Heap   |
-| :-------------------------------------------- | :--------------- | :---------- | :--------- | :---------- | :---------- |
-| **@hyperttp/core (with Undici Transport)** 🚀 | **22.48K rps**   | **8.81ms**  | **7.47ms** | **21.10ms** | **49.8 MB** |
-| Pure `undici`                                 | 17.50K rps       | 11.36ms     | 10.31ms    | 39.45ms     | 68.0 MB     |
-| `axios`                                       | 5.47K rps        | 36.35ms     | 34.61ms    | 62.03ms     | 125.0 MB    |
+### Node.js v24.16.0 — UndiciTransport
+
+- **OS:** linux 7.1.3-zen2-1-zen
+- **CPU:** Intel(R) Core(TM) i5-8600K CPU @ 3.60GHz
+
+| Rank | Client         |    RPS |      Avg |      p50 |      p90 |      p99 | Errors |
+| :--: | :------------- | -----: | -------: | -------: | -------: | -------: | -----: |
+| 🥇 1 | undici         | 15.98K | 12.47 ms | 12.08 ms | 14.17 ms | 18.80 ms |      0 |
+| 🥈 2 | @hyperttp/core | 13.08K | 15.11 ms | 13.98 ms | 17.03 ms | 23.32 ms |      0 |
+| 🥉 3 | bun-fetch      |  8.56K | 23.25 ms | 21.78 ms | 29.81 ms | 34.75 ms |      0 |
+| 4    | axios          |  4.74K | 42.08 ms | 40.66 ms | 46.62 ms | 56.00 ms |      0 |
 
 ## 📦 Installation
 

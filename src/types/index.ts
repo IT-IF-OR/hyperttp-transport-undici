@@ -1,4 +1,4 @@
-import type { HttpClientOptions, RetryOptions, StealthOptions } from "@hyperttp/types";
+import type { HttpClientOptions, RetryOptions, StealthOptions, CacheOptions } from "@hyperttp/types";
 import type { ReadableStream } from "stream/web";
 import type { Dispatcher } from "undici";
 
@@ -128,5 +128,17 @@ export interface UndiciTransportConfig {
      * @en SSL validation flag forwarding for TLS stack consistency.
      */
     rejectUnauthorized?: boolean;
+
+    /**
+     * @ru Конфигурация кэша HTTP-ответов.
+     * @en HTTP response cache configuration.
+     */
+    cache?: CacheOptions;
+
+    /**
+     * @ru Конфигурация кэша cookies.
+     * @en Cookie cache configuration.
+     */
+    cookieCache?: CacheOptions;
   };
 }

@@ -1,4 +1,5 @@
 import { Pool, Dispatcher } from "undici";
+import { CacheManager } from "hcacher";
 import type {
   HyperTransport,
   TransportRequest,
@@ -120,15 +121,52 @@ export class UndiciTransport implements HyperTransport {
   private readonly pools = new Map<string, Pool>();
   private readonly poolOptions: PoolOptions;
   private readonly defaultOrigin: string;
-  private readonly urlCache = new Map<
-    string,
-    { origin: string; path: string; fullUrl: string }
-  >();
+  private readonly urlCache = new CacheManager<{
+    origin: string;
+    path: string;
+    fullUrl: string;
+  }>({
+    enabled: true,
+    maxSize: 1000,
+    ttl: 300_000,
+    touchOnGet: true,
+  });
+
+  private readonly cookieStore: CacheManager<Record<string, string>>;
+  private readonly cookieStringCache: CacheManager<string>;
+  private readonly responseCache: CacheManager<TransportResponse> | null;
 
   constructor(config: UndiciTransportConfig) {
     this.config = config;
     this.isExternal = config.dispatcher !== undefined;
     this.poolOptions = createPoolOptions(config);
+
+    const cookieCfg = config?.network?.cookieCache;
+    this.cookieStore = new CacheManager<Record<string, string>>({
+      enabled: cookieCfg?.enabled ?? true,
+      maxSize: cookieCfg?.maxSize ?? 256,
+      ttl: cookieCfg?.ttl ?? 300_000,
+      touchOnGet: true,
+    });
+
+    this.cookieStringCache = new CacheManager<string>({
+      enabled: cookieCfg?.enabled ?? true,
+      maxSize: cookieCfg?.maxSize ?? 1024,
+      ttl: cookieCfg?.ttl ?? 60_000,
+      touchOnGet: true,
+    });
+
+    const cacheCfg = config?.network?.cache;
+    if (cacheCfg?.enabled !== false && (cacheCfg?.maxSize || cacheCfg?.ttl)) {
+      this.responseCache = new CacheManager<TransportResponse>({
+        enabled: cacheCfg?.enabled ?? true,
+        maxSize: cacheCfg?.maxSize ?? 256,
+        ttl: cacheCfg?.ttl ?? 30_000,
+        touchOnGet: true,
+      });
+    } else {
+      this.responseCache = null;
+    }
 
     const parsed = this.parseUrlCached(this.baseUrl);
     this.defaultOrigin = parsed.origin;
@@ -149,11 +187,6 @@ export class UndiciTransport implements HyperTransport {
     if (cached) return cached;
 
     const parsed = fastParseUrl(url, this.baseUrl);
-
-    if (this.urlCache.size >= 1000) {
-      const firstKey = this.urlCache.keys().next().value;
-      if (firstKey !== undefined) this.urlCache.delete(firstKey);
-    }
     this.urlCache.set(url, parsed);
     return parsed;
   }
@@ -465,6 +498,9 @@ export class UndiciTransport implements HyperTransport {
     for (const p of this.pools.values()) promises.push(p.close());
     this.pools.clear();
     this.urlCache.clear();
+    this.cookieStore.clear();
+    this.cookieStringCache.clear();
+    this.responseCache?.clear();
     await Promise.all(promises);
   }
 
@@ -480,6 +516,9 @@ export class UndiciTransport implements HyperTransport {
     for (const p of this.pools.values()) promises.push(p.destroy());
     this.pools.clear();
     this.urlCache.clear();
+    this.cookieStore.clear();
+    this.cookieStringCache.clear();
+    this.responseCache?.clear();
     await Promise.all(promises);
   }
 }
