@@ -1,45 +1,35 @@
-import { Pool, Dispatcher } from "undici";
-import { CacheManager } from "hcacher";
+import net from "node:net";
+import { Readable } from "node:stream";
+import tls from "node:tls";
 import type {
   HyperTransport,
+  SenderProtocol,
   TransportRequest,
   TransportResponse,
+} from "@hyperttp/types";
+import { CacheManager } from "hcacher";
+import { Dispatcher, Pool } from "undici";
+
+import type {
+  Fingerprint,
+  PoolOptions,
+  StealthOptions,
   TransportResponsePayload,
   TransportStreamExtensions,
-  StealthOptions,
-  Fingerprint,
-} from "@hyperttp/types";
-import {
-  abortError,
-  createPoolOptions,
-  fastParseUrl,
-  normalizeHeaders,
-} from "./utils/helpers.js";
-import type { PoolOptions, UndiciTransportConfig } from "./types/index.js";
+  UndiciTransportConfig,
+} from "./types/index.js";
+
 import { createDecompressStream } from "./utils/decompress.js";
-import { Readable } from "node:stream";
-import net from "node:net";
-import tls from "node:tls";
+import { abortError, createPoolOptions, fastParseUrl, normalizeHeaders } from "./utils/helpers.js";
 
 const DEFAULT_BASE_URL = "http://localhost:3000";
 
-interface Closeable {
-  close(): Promise<void>;
-}
-interface Destroyable {
-  destroy(): Promise<void>;
-}
-
 type UndiciPoolOptions = NonNullable<ConstructorParameters<typeof Pool>[1]>;
-type UndiciConnectorFn = Extract<
-  NonNullable<UndiciPoolOptions["connect"]>,
-  Function
->;
+type UndiciConnectorFn = Extract<NonNullable<UndiciPoolOptions["connect"]>, Function>;
 
 const STEALTH_HEADER_PRESETS: Record<string, Record<string, string>> = {
   chrome: {
-    "sec-ch-ua":
-      '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+    "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Linux"',
     "sec-fetch-dest": "document",
@@ -86,7 +76,7 @@ function applyStealthHeaders(
   headers: Record<string, string>,
   stealth: StealthOptions,
 ): Record<string, string> {
-  if (!stealth || !stealth.fingerprint) return headers;
+  if (!stealth?.fingerprint) return headers;
 
   const presetName = stealth.fingerprint;
   const presetHeaders = STEALTH_HEADER_PRESETS[presetName];
@@ -100,11 +90,7 @@ function applyStealthHeaders(
   }
 
   const currentUA = headers["user-agent"];
-  if (
-    currentUA === undefined ||
-    currentUA === "hyperttp/2.0" ||
-    currentUA === "Hyperttp/2.0"
-  ) {
+  if (currentUA === undefined || currentUA === "hyperttp/2.0" || currentUA === "Hyperttp/2.0") {
     const browserUA = STEALTH_UA_PRESETS[presetName];
     if (browserUA) {
       headers["user-agent"] = browserUA;
@@ -115,22 +101,19 @@ function applyStealthHeaders(
 }
 
 export class UndiciTransport implements HyperTransport {
+  public readonly protocols = ["rest"] as const;
   public config: UndiciTransportConfig;
   private readonly pool: Dispatcher;
   private readonly isExternal: boolean;
   private readonly pools = new Map<string, Pool>();
   private readonly poolOptions: PoolOptions;
   private readonly defaultOrigin: string;
-  private readonly urlCache = new CacheManager<{
-    origin: string;
-    path: string;
-    fullUrl: string;
-  }>({
-    enabled: true,
-    maxSize: 1000,
-    ttl: 300_000,
-    touchOnGet: true,
-  });
+
+  private readonly fastUrlCache = new Map<
+    string,
+    { origin: string; path: string; fullUrl: string }
+  >();
+  private readonly urlCacheMaxSize = 1000;
 
   private readonly cookieStore: CacheManager<Record<string, string>>;
   private readonly cookieStringCache: CacheManager<string>;
@@ -170,8 +153,7 @@ export class UndiciTransport implements HyperTransport {
 
     const parsed = this.parseUrlCached(this.baseUrl);
     this.defaultOrigin = parsed.origin;
-    this.pool =
-      config.dispatcher ?? this.createNewPool(parsed.origin, config.stealth);
+    this.pool = config.dispatcher ?? this.createNewPool(parsed.origin, config.stealth);
   }
 
   private get baseUrl(): string {
@@ -183,18 +165,25 @@ export class UndiciTransport implements HyperTransport {
     path: string;
     fullUrl: string;
   } {
-    const cached = this.urlCache.get(url);
+    const cached = this.fastUrlCache.get(url);
     if (cached) return cached;
 
     const parsed = fastParseUrl(url, this.baseUrl);
-    this.urlCache.set(url, parsed);
+    if (this.fastUrlCache.size >= this.urlCacheMaxSize) {
+      this.fastUrlCache.clear();
+    }
+    this.fastUrlCache.set(url, parsed);
     return parsed;
   }
 
-  public execute(req: TransportRequest): Promise<TransportResponse> {
+  public supports(protocol: SenderProtocol): boolean {
+    return protocol === "rest";
+  }
+
+  public execute(req: TransportRequest & { stealth?: StealthOptions }): Promise<TransportResponse> {
     const signal = req.signal;
     if (signal?.aborted) {
-      throw abortError(signal.reason);
+      return Promise.reject(abortError(signal.reason));
     }
 
     const parsed = this.parseUrlCached(req.url);
@@ -207,92 +196,64 @@ export class UndiciTransport implements HyperTransport {
         : reqStealth
       : configStealth;
 
-    let headers: Record<string, string> | undefined;
+    let headers: Record<string, string>;
     if (req.headers) {
-      if (
-        !stealth &&
-        typeof req.headers === "object" &&
-        !(req.headers instanceof Headers) &&
-        !Array.isArray(req.headers)
-      ) {
-        let needsNormalize = false;
-        const src = req.headers as Record<string, unknown>;
-        for (const key in src) {
-          if (key !== key.toLowerCase()) {
-            needsNormalize = true;
-            break;
-          }
-          const v = src[key];
-          if (v == null || Array.isArray(v)) {
-            needsNormalize = true;
-            break;
-          }
-        }
-        headers = needsNormalize
-          ? normalizeHeaders(req.headers)
-          : (src as Record<string, string>);
-      } else {
-        headers = normalizeHeaders(req.headers);
-      }
+      headers = normalizeHeaders(req.headers);
+    } else {
+      headers = {};
     }
 
     if (stealth) {
-      headers = headers ? { ...headers } : {};
       headers = applyStealthHeaders(headers, stealth);
     }
 
     const body = (req.body ?? null) as Dispatcher.DispatchOptions["body"];
-    const pool = this.isExternal
-      ? this.pool
-      : this.getPool(parsed.origin, stealth);
+    const pool = this.isExternal ? this.pool : this.getPool(parsed.origin, stealth);
 
-    return pool
-      .request({
-        path: parsed.path,
-        method: req.method,
-        headers: headers as Dispatcher.DispatchOptions["headers"],
-        body,
-        signal,
-      })
-      .then((response) => {
-        const ce = response.headers["content-encoding"];
-        const encoding = Array.isArray(ce) ? ce[0] : ce;
+    const options: Dispatcher.RequestOptions = {
+      path: parsed.path,
+      method: req.method,
+      headers: headers as Dispatcher.DispatchOptions["headers"],
+      body,
+      signal,
+    };
+    if (this.isExternal) {
+      options.origin = parsed.origin;
+    }
 
-        if (encoding) {
-          const bodyWeb = Readable.toWeb(
-            response.body,
-          ) as ReadableStream<Uint8Array>;
-          const decompressed = createDecompressStream(bodyWeb, encoding);
-          delete (response.headers as any)["content-encoding"];
-          return {
-            status: response.statusCode,
-            headers: response.headers as Record<string, string | string[]>,
-            url: parsed.fullUrl,
-            body: decompressed as TransportResponsePayload,
-          };
-        }
+    return pool.request(options).then((response) => {
+      const responseHeaders = response.headers as Record<string, string | string[]>;
+      const ce = responseHeaders["content-encoding"];
+      const encoding = Array.isArray(ce) ? ce[0] : ce;
 
-        const nodeBody = response.body;
-        (nodeBody as TransportStreamExtensions).dump = () => {
-          nodeBody.destroy();
-          return Promise.resolve();
-        };
+      if (encoding) {
+        const bodyWeb = Readable.toWeb(response.body) as ReadableStream<Uint8Array>;
+        const decompressed = createDecompressStream(bodyWeb, encoding);
 
-        const result: TransportResponse & {
-          _raw?: { body: unknown; arrayBuffer: () => Promise<ArrayBuffer> };
-        } = {
+        const cleanedHeaders = { ...responseHeaders };
+        delete cleanedHeaders["content-encoding"];
+
+        return {
           status: response.statusCode,
-          headers: response.headers as Record<string, string | string[]>,
+          headers: cleanedHeaders,
           url: parsed.fullUrl,
-          body: nodeBody as unknown as TransportResponsePayload,
+          body: decompressed as TransportResponsePayload,
         };
-        result._raw = {
-          body: nodeBody,
-          arrayBuffer: () => nodeBody.arrayBuffer(),
-        };
+      }
 
-        return result;
-      });
+      const nodeBody = response.body;
+      (nodeBody as TransportStreamExtensions).dump = () => {
+        nodeBody.destroy();
+        return Promise.resolve();
+      };
+
+      return {
+        status: response.statusCode,
+        headers: responseHeaders,
+        url: parsed.fullUrl,
+        body: nodeBody as unknown as TransportResponsePayload,
+      };
+    });
   }
 
   public rawRequest(
@@ -305,36 +266,31 @@ export class UndiciTransport implements HyperTransport {
     const parsed = this.parseUrlCached(url);
     const pool = this.isExternal ? this.pool : this.getPool(parsed.origin);
 
-    return pool
-      .request({
-        path: parsed.path,
-        method,
-        headers: headers as Dispatcher.DispatchOptions["headers"],
-        body: (body ?? null) as Dispatcher.DispatchOptions["body"],
-        signal,
-      })
-      .then((response) => {
-        const nodeBody = response.body;
-        (nodeBody as TransportStreamExtensions).dump = () => {
-          nodeBody.destroy();
-          return Promise.resolve();
-        };
+    const options: Dispatcher.RequestOptions = {
+      path: parsed.path,
+      method,
+      headers: headers as Dispatcher.DispatchOptions["headers"],
+      body: (body ?? null) as Dispatcher.DispatchOptions["body"],
+      signal,
+    };
+    if (this.isExternal) {
+      options.origin = parsed.origin;
+    }
 
-        const result: TransportResponse & {
-          _raw?: { body: unknown; arrayBuffer: () => Promise<ArrayBuffer> };
-        } = {
-          status: response.statusCode,
-          headers: response.headers as Record<string, string | string[]>,
-          url: parsed.fullUrl,
-          body: nodeBody as unknown as TransportResponsePayload,
-        };
-        result._raw = {
-          body: nodeBody,
-          arrayBuffer: () => nodeBody.arrayBuffer(),
-        };
+    return pool.request(options).then((response) => {
+      const nodeBody = response.body;
+      (nodeBody as TransportStreamExtensions).dump = () => {
+        nodeBody.destroy();
+        return Promise.resolve();
+      };
 
-        return result;
-      });
+      return {
+        status: response.statusCode,
+        headers: response.headers as Record<string, string | string[]>,
+        url: parsed.fullUrl,
+        body: nodeBody as unknown as TransportResponsePayload,
+      };
+    });
   }
 
   public fastRequest(
@@ -350,22 +306,25 @@ export class UndiciTransport implements HyperTransport {
     const parsed = this.parseUrlCached(url);
     const pool = this.isExternal ? this.pool : this.getPool(parsed.origin);
 
-    return pool
-      .request({
-        path: parsed.path,
-        method,
-        headers: headers as Dispatcher.DispatchOptions["headers"],
-        body: null,
-        signal,
-      })
-      .then((response) => {
-        const nodeBody = response.body;
-        return {
-          status: response.statusCode,
-          headers: response.headers as Record<string, string | string[]>,
-          arrayBuffer: () => nodeBody.arrayBuffer(),
-        };
-      });
+    const options: Dispatcher.RequestOptions = {
+      path: parsed.path,
+      method,
+      headers: headers as Dispatcher.DispatchOptions["headers"],
+      body: null,
+      signal,
+    };
+    if (this.isExternal) {
+      options.origin = parsed.origin;
+    }
+
+    return pool.request(options).then((response) => {
+      const nodeBody = response.body;
+      return {
+        status: response.statusCode,
+        headers: response.headers as Record<string, string | string[]>,
+        arrayBuffer: () => nodeBody.arrayBuffer(),
+      };
+    });
   }
 
   private getPool(origin: string, stealth?: StealthOptions): Pool {
@@ -379,9 +338,8 @@ export class UndiciTransport implements HyperTransport {
     return created;
   }
 
-  private buildPoolKey(origin: string, stealth?: StealthOptions): string {
-    if (!stealth) return origin;
-    return `${origin}::${stealth.fingerprint ?? "none"}::${stealth.ciphers ?? "none"}::${stealth.fragment ?? "none"}::${stealth.http2 ? "h2" : "h1"}`;
+  private buildPoolKey(origin: string, stealth: StealthOptions): string {
+    return `${origin}:${stealth.fingerprint || ""}:${stealth.ciphers || ""}:${stealth.fragment || ""}:${stealth.http2 ? 1 : 0}`;
   }
 
   private createNewPool(origin: string, stealth?: StealthOptions): Pool {
@@ -394,10 +352,7 @@ export class UndiciTransport implements HyperTransport {
     }
 
     const connectFactory: UndiciConnectorFn = (options, callback) => {
-      let port =
-        typeof options.port === "string"
-          ? parseInt(options.port, 10)
-          : options.port;
+      let port = typeof options.port === "string" ? parseInt(options.port, 10) : options.port;
       if (!port || Number.isNaN(port)) {
         port = options.protocol === "https:" ? 443 : 80;
       }
@@ -474,8 +429,7 @@ export class UndiciTransport implements HyperTransport {
     };
 
     const isCustomConnectRequired =
-      stealth?.fragment === "split" ||
-      Object.keys(tlsConnectOptions).length > 0;
+      stealth?.fragment === "split" || Boolean(tlsConnectOptions.ciphers);
 
     return new Pool(origin, {
       connections: this.poolOptions.connections,
@@ -489,15 +443,12 @@ export class UndiciTransport implements HyperTransport {
   public async close(): Promise<void> {
     if (this.isExternal) return;
     const promises: Promise<void>[] = [];
-    if (
-      "close" in this.pool &&
-      typeof (this.pool as Closeable).close === "function"
-    ) {
-      promises.push((this.pool as Closeable).close());
+    if ("close" in this.pool && typeof (this.pool as any).close === "function") {
+      promises.push((this.pool as any).close());
     }
     for (const p of this.pools.values()) promises.push(p.close());
     this.pools.clear();
-    this.urlCache.clear();
+    this.fastUrlCache.clear();
     this.cookieStore.clear();
     this.cookieStringCache.clear();
     this.responseCache?.clear();
@@ -507,15 +458,12 @@ export class UndiciTransport implements HyperTransport {
   public async destroy(): Promise<void> {
     if (this.isExternal) return;
     const promises: Promise<void>[] = [];
-    if (
-      "destroy" in this.pool &&
-      typeof (this.pool as Destroyable).destroy === "function"
-    ) {
-      promises.push((this.pool as Destroyable).destroy());
+    if ("destroy" in this.pool && typeof (this.pool as any).destroy === "function") {
+      promises.push((this.pool as any).destroy());
     }
     for (const p of this.pools.values()) promises.push(p.destroy());
     this.pools.clear();
-    this.urlCache.clear();
+    this.fastUrlCache.clear();
     this.cookieStore.clear();
     this.cookieStringCache.clear();
     this.responseCache?.clear();

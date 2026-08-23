@@ -1,24 +1,12 @@
 import type { TransportRequest } from "@hyperttp/types";
 import type { PoolOptions, UndiciTransportConfig } from "../types/index.js";
 
-/**
- * @ru Создаёт ошибку отмены операции из произвольной причины.
- * @en Creates an abort error from an arbitrary reason.
- * @param reason - The abort reason (Error, string, or other).
- * @returns An Error instance suitable for rejection.
- */
 export function abortError(reason?: unknown): Error {
   if (reason instanceof Error) return reason;
   if (typeof reason === "string" && reason.length > 0) return new Error(reason);
   return new DOMException("The operation was aborted.", "AbortError");
 }
 
-/**
- * @ru Создаёт опции пула соединений Undici из конфигурации клиента.
- * @en Creates Undici connection pool options from client configuration.
- * @param config - Transport configuration.
- * @returns Pool options with defaults applied.
- */
 export function createPoolOptions(config: UndiciTransportConfig): PoolOptions {
   const net = config.network;
   return {
@@ -29,25 +17,19 @@ export function createPoolOptions(config: UndiciTransportConfig): PoolOptions {
   };
 }
 
-/**
- * @ru Быстрый парсер URL без использования `new URL()` в большинстве случаев.
- * Извлекает origin, path и полный URL для передачи в Undici dispatcher.
- * @en Fast URL parser without using `new URL()` in most cases.
- * Extracts origin, path, and full URL for Undici dispatcher.
- * @param url - The URL string to parse.
- * @param defaultBase - Default base URL for relative paths.
- * @returns Object with origin, path, and fullUrl.
- */
 export function fastParseUrl(
   url: string,
   defaultBase: string,
 ): { origin: string; path: string; fullUrl: string } {
+  const len = url.length;
+  if (len === 0) return fallbackParse(url, defaultBase);
+
   const firstChar = url.charCodeAt(0);
 
   if (firstChar === 47) {
     // '/'
-    if (url.charCodeAt(1) === 47) {
-      // '//' - protocol-relative
+    if (len > 1 && url.charCodeAt(1) === 47) {
+      // '//'
       return fallbackParse("https:" + url, defaultBase);
     }
     const hashIdx = url.indexOf("#");
@@ -62,39 +44,25 @@ export function fastParseUrl(
   const schemeIdx = url.indexOf("://");
   if (schemeIdx !== -1) {
     const start = schemeIdx + 3;
-    const len = url.length;
-
     let pathIdx = -1;
     let qIdx = -1;
     let hashIdx = -1;
-    let hasUserInfo = false;
 
     for (let i = start; i < len; i++) {
       const code = url.charCodeAt(i);
-
-      if (code === 64) {
-        // '@' - userinfo detected
-        hasUserInfo = true;
-      }
+      if (code === 64) return fallbackParse(url, defaultBase); // '@' userinfo
       if (code === 47) {
-        // '/'
         pathIdx = i;
         break;
       }
       if (code === 63) {
-        // '?'
         qIdx = i;
         break;
       }
       if (code === 35) {
-        // '#'
         hashIdx = i;
         break;
       }
-    }
-
-    if (hasUserInfo) {
-      return fallbackParse(url, defaultBase);
     }
 
     if (pathIdx !== -1) {
@@ -122,15 +90,6 @@ export function fastParseUrl(
   return fallbackParse(url, defaultBase);
 }
 
-/**
- * @ru Fallback-парсер URL через нативный URL API.
- * Используется для сложных случаев (userinfo, protocol-relative и т.д.).
- * @en Fallback URL parser using native URL API.
- * Used for complex cases (userinfo, protocol-relative, etc.).
- * @param url - The URL string to parse.
- * @param defaultBase - Default base URL for relative paths.
- * @returns Object with origin, path, and fullUrl.
- */
 function fallbackParse(
   url: string,
   defaultBase: string,
@@ -148,39 +107,21 @@ function fallbackParse(
   }
 }
 
-/**
- * @ru Быстрая нормализация заголовков ответа: переводит ключи в нижний регистр.
- * Значения не меняет (могут быть string | string[]).
- * @en Fast response header normalization: lowercases all keys.
- * Values are kept as-is (string | string[]).
- * @param headers - Response headers from undici.
- * @returns Normalized headers with lowercase keys.
- */
 export function fastNormalizeResponseHeaders(
   headers: Record<string, string | string[]>,
 ): Record<string, string | string[]> {
-  const out: Record<string, string | string[]> = Object.create(null);
+  const out: Record<string, string | string[]> = {};
   for (const key in headers) {
     out[key.toLowerCase()] = headers[key]!;
   }
   return out;
 }
 
-/**
- * @ru Нормализует заголовки, переводя все ключи в нижний регистр.
- * Поддерживает Headers, массив пар и Record.
- * Массивы значений объединяются через ", " (или "; " для cookie).
- * @en Normalizes headers by transforming all keys to lowercase.
- * Supports Headers, array of pairs, and Record.
- * Array values are joined with ", " (or "; " for cookie).
- * @param headers - The headers to normalize.
- * @returns Normalized headers object with lowercase keys.
- */
 export function normalizeHeaders(headers: TransportRequest["headers"]): Record<string, string> {
-  if (!headers) return Object.create(null);
+  if (!headers) return {};
 
   if (headers instanceof Headers) {
-    const out: Record<string, string> = Object.create(null);
+    const out: Record<string, string> = {};
     headers.forEach((value, key) => {
       out[key.toLowerCase()] = value;
     });
@@ -188,34 +129,46 @@ export function normalizeHeaders(headers: TransportRequest["headers"]): Record<s
   }
 
   if (Array.isArray(headers)) {
-    const out: Record<string, string> = Object.create(null);
-    for (let i = 0; i < headers.length; i++) {
-      const pair = headers[i] as unknown as [string, string] | undefined;
-      if (!pair) continue;
-      out[pair[0].toLowerCase()] = pair[1];
+    const out: Record<string, string> = {};
+    for (let i = 0; i < headers.length; i += 2) {
+      const key = headers[i];
+      const value = headers[i + 1];
+      if (typeof key !== "string" || !key || value == null) continue;
+      out[key.toLowerCase()] = String(value);
     }
     return out;
   }
 
   const src = headers as Record<string, unknown>;
 
-  // Быстрый path: уже lowercase, без массивов — возвращаем как есть
   let needsNormalize = false;
   for (const key in src) {
-    if (key !== key.toLowerCase()) { needsNormalize = true; break; }
+    if (key !== key.toLowerCase()) {
+      needsNormalize = true;
+      break;
+    }
     const v = src[key];
-    if (v == null || Array.isArray(v)) { needsNormalize = true; break; }
+    if (v == null || Array.isArray(v)) {
+      needsNormalize = true;
+      break;
+    }
   }
   if (!needsNormalize) return src as Record<string, string>;
 
-  const out: Record<string, string> = Object.create(null);
+  const out: Record<string, string> = {};
   for (const key in src) {
     const value = src[key];
     if (value == null) continue;
 
     const lowerKey = key.toLowerCase();
     if (Array.isArray(value)) {
-      out[lowerKey] = lowerKey === "cookie" ? value.join("; ") : value.join(", ");
+      if (lowerKey === "set-cookie") {
+        out[lowerKey] = value.join("\n");
+      } else if (lowerKey === "cookie") {
+        out[lowerKey] = value.join("; ");
+      } else {
+        out[lowerKey] = value.join(", ");
+      }
       continue;
     }
 

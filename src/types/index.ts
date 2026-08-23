@@ -1,72 +1,86 @@
-import type { HttpClientOptions, RetryOptions, StealthOptions, CacheOptions } from "@hyperttp/types";
 import type { ReadableStream } from "stream/web";
 import type { Dispatcher } from "undici";
 
 /**
- * @ru Конфигурация сетевого транспорта, расширяющая базовые опции клиента.
- * @en Transport layer configuration expanding the core HTTP client options.
+ * @ru Имя отпечатка TLS-профиля, имитирующего реальный браузер.
+ * @en TLS profile name emulating a specific real-world browser fingerprint.
  */
-export interface TransportConfig extends HttpClientOptions {
+export type Fingerprint = "chrome" | "firefox" | "safari" | "edge";
+
+/**
+ * @ru Параметры скрытности: эмуляция TLS-отпечатков (JA3/JA4), подбор шифров, DPI-обход.
+ * @en Stealth options: TLS fingerprint emulation (JA3/JA4), cipher selection, DPI evasion.
+ */
+export interface StealthOptions {
   /**
-   * @ru Опции политики повторных запросов (ретраев).
-   * @en Retry policy behavior and strategy configurations.
+   * @ru Имя браузерного отпечатка, по которому подбираются шифры.
+   * @en Browser fingerprint name used to select a cipher suite.
    */
-  retry?: RetryOptions;
+  fingerprint?: Fingerprint;
 
   /**
-   * @ru Параметры скрытности, эмуляции отпечатков TLS (JA3/JA4) и обхода систем DPI.
-   * @en Stealth options for TLS fingerprint emulation and DPI evasion strategies.
+   * @ru Явный список TLS-шифров (переопределяет подбор по отпечатку).
+   * @en Explicit TLS cipher list (overrides fingerprint-based selection).
    */
-  stealth?: StealthOptions;
+  ciphers?: string;
 
   /**
-   * @ru Низкоуровневые параметры тюнинга сетевых соединений сокетов.
-   * @en Low-level parameters optimized for underlying network socket connection tuning.
+   * @ru Включает HTTP/2 (ALPN h2) для создаваемых пулов соединений.
+   * @en Enables HTTP/2 (ALPN h2) for generated connection pools.
    */
-  network?: {
-    /**
-     * @ru Максимальное количество параллельно открытых сокетов в пуле.
-     * @en Maximum concurrent open sockets allocated within the connection pool.
-     */
-    maxConcurrent?: number;
+  http2?: boolean;
 
-    /**
-     * @ru Глубина конвейеризации HTTP-запросов (pipelining) внутри одного сокета.
-     * @en HTTP pipelining factor specifying the maximum pending requests per single socket.
-     */
-    pipelining?: number;
-
-    /**
-     * @ru Время удержания простаивающего сокета в миллисекундах (Keep-Alive).
-     * @en Inactivity timeout in milliseconds keeping idle pool sockets alive.
-     */
-    keepAliveTimeout?: number;
-
-    /**
-     * @ru Предельное время ожидания ответа на запрос (таймаут операции) в миллисекундах.
-     * @en High-level timeout threshold in milliseconds covering the entire lifecycle of a request.
-     */
-    timeout?: number;
-
-    /**
-     * @ru Флаг автоматического следования HTTP-редиректам (3xx коды).
-     * @en Determines whether the engine should transparently follow HTTP redirect signatures (3xx).
-     */
-    followRedirects?: boolean;
-
-    /**
-     * @ru Максимально допустимое количество последовательных перенаправлений.
-     * @en Boundary limit protecting execution context from infinite redirect cycles.
-     */
-    maxRedirects?: number;
-
-    /**
-     * @ru Проверка валидности SSL/TLS сертификатов удаленного сервера.
-     * @en Determines whether to verify the remote host's SSL/TLS certificate integrity chain.
-     */
-    rejectUnauthorized?: boolean;
-  };
+  /**
+   * @ru Способ фрагментации запросов для обхода DPI-фильтрации.
+   * @en Request fragmentation strategy to bypass DPI-based filtering.
+   */
+  fragment?: "split" | "none";
 }
+
+/**
+ * @ru Конфигурация кэша: включение, максимальный размер и время жизни записей.
+ * @en Cache configuration: enablement, maximum size and entry TTL.
+ */
+export interface CacheOptions {
+  /**
+   * @ru Флаг включения кэша.
+   * @en Enables the cache.
+   */
+  enabled?: boolean;
+
+  /**
+   * @ru Максимальное количество записей в кэше.
+   * @en Maximum number of entries stored in the cache.
+   */
+  maxSize?: number;
+
+  /**
+   * @ru Время жизни записей кэша в миллисекундах.
+   * @en Entry time-to-live in milliseconds.
+   */
+  ttl?: number;
+}
+
+/**
+ * @ru Дополнительные методы, навешиваемые на транспортный поток/буфер ответа.
+ * @en Extra methods attached to the transport response stream/buffer.
+ */
+export interface TransportStreamExtensions {
+  /**
+   * @ru Полностью вычитывает тело ответа (сбрасывает поток в пустоту).
+   * @en Fully drains the response body (discards the stream).
+   */
+  dump(): Promise<void>;
+}
+
+/**
+ * @ru Тело ответа на транспортном уровне: сырой стрим или буфер байтов.
+ * @en Transport-level response payload: a raw stream or byte buffer.
+ */
+export type TransportResponsePayload =
+  | (ReadableStream<Uint8Array> & TransportStreamExtensions)
+  | (Uint8Array & TransportStreamExtensions)
+  | null;
 
 /**
  * @ru Внутренний атомарный результат низкоуровневой диспетчеризации запроса.

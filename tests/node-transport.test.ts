@@ -2,22 +2,36 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from "undici";
 import { Readable } from "node:stream";
 import { UndiciTransport } from "../src/index.js";
-import type { TransportRequest } from "@hyperttp/types";
+import type { TransportRequest, TransportResponse } from "@hyperttp/types";
 
 const BASE_URL = "http://localhost:3000";
 
-describe("NodeTransport - Integration Pipeline", () => {
+async function readBody(response: TransportResponse): Promise<string> {
+  const body = response.body as NodeJS.ReadableStream;
+  const chunks: Buffer[] = [];
+  for await (const chunk of body as AsyncIterable<Buffer>) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+describe("UndiciTransport - Neutral Contract", () => {
   let mockAgent: MockAgent;
   let transport: UndiciTransport;
   let originalDispatcher: ReturnType<typeof getGlobalDispatcher>;
 
   const makeRequest = (
     req: Partial<TransportRequest> & { url: string },
-  ): TransportRequest => ({
-    method: "GET",
-    headers: {},
-    ...req,
-  });
+  ): TransportRequest => {
+    const { protocol = "rest", ...request } = req;
+
+    return {
+      method: "GET",
+      headers: {},
+      ...request,
+      protocol,
+    };
+  };
 
   beforeEach(() => {
     originalDispatcher = getGlobalDispatcher();
@@ -37,48 +51,41 @@ describe("NodeTransport - Integration Pipeline", () => {
     setGlobalDispatcher(originalDispatcher);
   });
 
-  it("executes GET and parses JSON", async () => {
-    const payload = { ok: true, hello: "world" };
-
+  it("executes GET and exposes the raw body stream", async () => {
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/json", method: "GET" })
-      .reply(200, payload, {
+      .reply(200, JSON.stringify({ ok: true, hello: "world" }), {
         headers: { "content-type": "application/json" },
       });
 
     const response = await transport.execute(makeRequest({ url: "/json" }));
     expect(response.status).toBe(200);
     expect(response.headers["content-type"]).toContain("application/json");
-    expect(await response.json()).toEqual(payload);
+    expect(JSON.parse(await readBody(response))).toEqual({
+      ok: true,
+      hello: "world",
+    });
   });
 
-  it("executes GET and returns text", async () => {
+  it("returns raw text body", async () => {
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/text" })
       .reply(200, "plain text body");
     const response = await transport.execute(makeRequest({ url: "/text" }));
-    expect(await response.text()).toBe("plain text body");
+    expect(await readBody(response)).toBe("plain text body");
   });
 
-  it("returns empty string for empty text body", async () => {
+  it("returns empty string for empty body", async () => {
     mockAgent.get(BASE_URL).intercept({ path: "/empty-text" }).reply(200, "");
     const response = await transport.execute(
       makeRequest({ url: "/empty-text" }),
     );
-    expect(await response.text()).toBe("");
+    expect(await readBody(response)).toBe("");
   });
 
-  it("returns null for empty JSON body", async () => {
-    mockAgent.get(BASE_URL).intercept({ path: "/empty-json" }).reply(204, "");
-    const response = await transport.execute(
-      makeRequest({ url: "/empty-json" }),
-    );
-    expect(await response.json()).toBeNull();
-  });
-
-  it("throws on invalid JSON", async () => {
+  it("does not parse the body (invalid JSON is returned raw)", async () => {
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/invalid-json" })
@@ -86,7 +93,7 @@ describe("NodeTransport - Integration Pipeline", () => {
     const response = await transport.execute(
       makeRequest({ url: "/invalid-json" }),
     );
-    await expect(response.json()).rejects.toThrow();
+    expect(await readBody(response)).toBe("{invalid json");
   });
 
   it("normalizes response headers to lowercase", async () => {
@@ -95,7 +102,7 @@ describe("NodeTransport - Integration Pipeline", () => {
       .intercept({ path: "/headers" })
       .reply(
         200,
-        { ok: true },
+        JSON.stringify({ ok: true }),
         {
           headers: { "X-Test": "hello", "Content-Type": "application/json" },
         },
@@ -113,7 +120,7 @@ describe("NodeTransport - Integration Pipeline", () => {
         path: "/request-headers",
         headers: { authorization: "Bearer token", "x-custom": "hello" },
       })
-      .reply(200, { ok: true });
+      .reply(200, "ok");
 
     const response = await transport.execute(
       makeRequest({
@@ -128,7 +135,7 @@ describe("NodeTransport - Integration Pipeline", () => {
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/post", method: "POST", body: '{"foo":"bar"}' })
-      .reply(201, { created: true });
+      .reply(201, JSON.stringify({ created: true }));
 
     const response = await transport.execute(
       makeRequest({
@@ -138,7 +145,7 @@ describe("NodeTransport - Integration Pipeline", () => {
       }),
     );
     expect(response.status).toBe(201);
-    expect(await response.json()).toEqual({ created: true });
+    expect(JSON.parse(await readBody(response))).toEqual({ created: true });
   });
 
   it("supports Buffer body", async () => {
@@ -147,9 +154,10 @@ describe("NodeTransport - Integration Pipeline", () => {
       .intercept({
         path: "/buffer",
         method: "POST",
-        body: (body: any) => Buffer.from(body).toString() === "hello",
+        body: (body: unknown) =>
+          Buffer.from(body as string).toString() === "hello",
       })
-      .reply(200, { ok: true });
+      .reply(200, "ok");
 
     const response = await transport.execute(
       makeRequest({
@@ -165,7 +173,7 @@ describe("NodeTransport - Integration Pipeline", () => {
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/stream", method: "POST" })
-      .reply(200, { ok: true });
+      .reply(200, "ok");
     const response = await transport.execute(
       makeRequest({
         url: "/stream",
@@ -180,26 +188,28 @@ describe("NodeTransport - Integration Pipeline", () => {
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/not-found" })
-      .reply(404, { error: "Not Found" });
+      .reply(404, JSON.stringify({ error: "Not Found" }));
     const response = await transport.execute(
       makeRequest({ url: "/not-found" }),
     );
     expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: "Not Found" });
+    expect(JSON.parse(await readBody(response))).toEqual({
+      error: "Not Found",
+    });
   });
 
   it("supports relative and absolute URLs", async () => {
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/relative" })
-      .reply(200, { ok: true });
+      .reply(200, "ok");
     const res1 = await transport.execute(makeRequest({ url: "/relative" }));
     expect(res1.status).toBe(200);
 
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/absolute" })
-      .reply(200, { ok: true });
+      .reply(200, "ok");
     const res2 = await transport.execute(
       makeRequest({ url: `${BASE_URL}/absolute` }),
     );
@@ -217,7 +227,7 @@ describe("NodeTransport - Integration Pipeline", () => {
 
     expect(response.body).toBeInstanceOf(Readable);
     const chunks: Buffer[] = [];
-    for await (const chunk of response.body as any) {
+    for await (const chunk of response.body as AsyncIterable<Buffer>) {
       chunks.push(Buffer.from(chunk));
     }
     expect(Buffer.concat(chunks).toString("utf8")).toBe("hello world");
@@ -238,6 +248,7 @@ describe("NodeTransport - Integration Pipeline", () => {
     const promise = transport.execute({
       url: "/abort",
       method: "GET",
+      protocol: "rest",
       signal: controller.signal,
       headers: {},
     });
@@ -261,7 +272,7 @@ describe("NodeTransport - Integration Pipeline", () => {
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/concurrent" })
-      .reply(200, { ok: true })
+      .reply(200, "ok")
       .persist();
 
     const total = 100;
@@ -275,40 +286,5 @@ describe("NodeTransport - Integration Pipeline", () => {
     for (const response of results) {
       expect(response.status).toBe(200);
     }
-  });
-
-  it("transforms POST to GET on 303 redirect", async () => {
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/redirect-303", method: "POST" })
-      .reply(303, "", { headers: { location: "/target-get" } });
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/target-get", method: "GET" })
-      .reply(200, { success: true });
-
-    const response = await transport.execute(
-      makeRequest({
-        url: "/redirect-303",
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ foo: "bar" }),
-      }),
-    );
-    expect(response.status).toBe(200);
-  });
-
-  it("gives up after max retries on 502 status", async () => {
-    transport.config.retry = { maxRetries: 2, baseDelay: 1, jitter: false };
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/bad-gateway" })
-      .reply(502, "Bad Gateway")
-      .times(3);
-
-    const response = await transport.execute(
-      makeRequest({ url: "/bad-gateway" }),
-    );
-    expect(response.status).toBe(502);
   });
 });

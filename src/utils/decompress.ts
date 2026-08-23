@@ -1,5 +1,12 @@
-import type { TransportStreamExtensions } from "@hyperttp/types";
-import { createGunzip, createInflate, createBrotliDecompress, gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
+import type { TransportStreamExtensions } from "../types/index.js";
+import {
+  createGunzip,
+  createInflate,
+  createBrotliDecompress,
+  gunzipSync,
+  inflateSync,
+  brotliDecompressSync,
+} from "node:zlib";
 import { Readable } from "node:stream";
 
 const NOOP_DUMP = async (): Promise<void> => {};
@@ -28,7 +35,9 @@ function attachNoopDump(buffer: Uint8Array): Uint8Array & TransportStreamExtensi
   return payload;
 }
 
-function attachStreamDump(stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> & TransportStreamExtensions {
+function attachStreamDump(
+  stream: ReadableStream<Uint8Array>,
+): ReadableStream<Uint8Array> & TransportStreamExtensions {
   const payload = stream as ReadableStream<Uint8Array> & TransportStreamExtensions;
   payload.dump = async (): Promise<void> => {
     try {
@@ -73,7 +82,10 @@ function decompressOnceNode(input: Uint8Array, encoding: string): Uint8Array {
   }
 }
 
-export async function decompressBuffer(body: Uint8Array, encoding: string): Promise<Uint8Array & TransportStreamExtensions> {
+export async function decompressBuffer(
+  body: Uint8Array,
+  encoding: string,
+): Promise<Uint8Array & TransportStreamExtensions> {
   let current: Uint8Array = body;
   const encodings = parseEncodings(encoding);
 

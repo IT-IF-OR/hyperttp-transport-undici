@@ -1,114 +1,119 @@
 # @hyperttp/transport-undici
 
-A high-performance network transport layer for the `hyperttp` HTTP client, built directly on top of the low-level
-**Undici Dispatch API**. Engineered specifically for Node.js environments with extreme throughput (RPS) requirements and
-ultra-low latency demands.
+> English | [Русский](https://github.com/IT-IF-OR/hyperttp-transport-undici/tree/main/lang/ru)
 
-## ✨ Features
+High-performance Node.js transport for `@hyperttp/core`, built on Undici's low-level Dispatcher API.
 
-- **Undici Dispatch API**: Bypasses the overhead of the standard `fetch` API and Node.js streams by
-  collecting chunk buffers directly via low-level pool lifecycle events.
-- **Ultra-Stable p99 Latency**: Drastically reduces Garbage Collector (GC) pressure by optimizing `AbortSignal`
-  lifecycle management and minimizing closure allocations per request.
-- **Native Policy Integration**: End-to-end,
-  out-of-the-box support for `hyperttp` core mechanisms including Retry Policies,
-  smart Redirect Policies, and custom network timeouts.
-- **Safe Event Loop**:
-  Isolated abort logic guarantees that connection teardowns never yield unhandled promise rejections or dangling timer macro-tasks.
+## Features
 
-## 📊 Performance (Node.js v24)
+- Direct integration with the Undici Dispatcher API.
+- Connection pooling with configurable concurrency, pipelining, and keep-alive timeout.
+- Support for an externally managed Undici `Dispatcher`.
+- Request cancellation through `AbortSignal`.
+- Optional response and cookie caches.
+- Optional TLS fingerprint, HTTP/2, and request-fragmentation settings.
+- REST transport contract for `@hyperttp/core@2` and `@hyperttp/types@^0.3.0`.
 
-Benchmark: **20,000 requests** · Concurrency: **200** · Duration: **60s** · Target: local JSON endpoint
+## Performance
 
-### Node.js v24.16.0 — UndiciTransport
+### Node.js v26.7.0 — UndiciTransport
 
-- **OS:** linux 7.1.3-zen2-1-zen
+#### Environment
+
+- **OS:** Linux 7.1.8-zen1-3-zen
 - **CPU:** Intel(R) Core(TM) i5-8600K CPU @ 3.60GHz
 
-| Rank | Client         |    RPS |      Avg |      p50 |      p90 |      p99 | Errors |
-| :--: | :------------- | -----: | -------: | -------: | -------: | -------: | -----: |
-| 🥇 1 | undici         | 15.98K | 12.47 ms | 12.08 ms | 14.17 ms | 18.80 ms |      0 |
-| 🥈 2 | @hyperttp/core | 13.08K | 15.11 ms | 13.98 ms | 17.03 ms | 23.32 ms |      0 |
-| 🥉 3 | bun-fetch      |  8.56K | 23.25 ms | 21.78 ms | 29.81 ms | 34.75 ms |      0 |
-| 4    | axios          |  4.74K | 42.08 ms | 40.66 ms | 46.62 ms | 56.00 ms |      0 |
+#### Benchmark results
 
-## 📦 Installation
+| Rank | Client               | RPS Med | RPS Trim | Δ Best | Avg       | p50       | p90       | p99       |
+| ---- | -------------------- | ------- | -------- | ------ | --------- | --------- | --------- | --------- |
+| 🥇 1 | @hyperttp/core-2.0.0 | 22.38K  | 22.42K   | (ref)  | 44.44 ms  | 44.27 ms  | 47.60 ms  | 58.58 ms  |
+| 🥈 2 | undici               | 22.10K  | 22.41K   | -1.3%  | 44.89 ms  | 44.64 ms  | 50.83 ms  | 60.42 ms  |
+| 🥉 3 | hyperttp-0.5.0       | 19.93K  | 19.98K   | -11.0% | 50.01 ms  | 49.39 ms  | 52.98 ms  | 71.36 ms  |
+| 4    | @hyperttp/core-1.5.6 | 18.55K  | 18.59K   | -17.1% | 53.62 ms  | 54.46 ms  | 61.10 ms  | 69.53 ms  |
+| 5    | @hyperttp/core-1.5.5 | 17.93K  | 17.95K   | -19.9% | 55.45 ms  | 56.78 ms  | 63.41 ms  | 73.89 ms  |
+| 6    | hyperttp-0.4.16      | 16.06K  | 16.00K   | -28.2% | 61.89 ms  | 63.74 ms  | 69.53 ms  | 80.35 ms  |
+| 7    | bun-fetch            | 9.07K   | 9.06K    | -59.5% | 109.69 ms | 112.25 ms | 127.68 ms | 143.30 ms |
 
-Since this transport is optional, you need to add it to your project manually:
+These results compare complete client stacks in one local environment; they are not a guarantee of production performance. Run the same benchmark with your workload, concurrency, payload, and network conditions before choosing a client.
+
+## Installation
 
 ```bash
-bun add @hyperttp/transport-undici
-# or
-npm install @hyperttp/transport-undici
-
+npm install @hyperttp/core @hyperttp/transport-undici
 ```
 
-## 🚀 Usage
+```bash
+bun add @hyperttp/core @hyperttp/transport-undici
+```
 
-### Basic Initialization with Core
+## Usage
+
+### With `@hyperttp/core`
 
 ```typescript
-import { HyperClient } from "@hyperttp/core";
+import { HyperCore } from "@hyperttp/core";
 import { UndiciTransport } from "@hyperttp/transport-undici";
 
-const client = new HyperClient({
+const transport = new UndiciTransport({
   baseUrl: "https://api.example.com",
-  transport: new UndiciTransport({
-    network: {
-      maxConcurrent: 500, // Maximum concurrent sockets
-      pipelining: 8, // Request pipelining depth per socket
-      keepAliveTimeout: 30000, // Socket keep-alive timeout in ms
-    },
-    retry: {
-      maxRetries: 3,
-      retryStatuses: [502, 503, 504],
-    },
-  }),
+  network: {
+    maxConcurrent: 500,
+    pipelining: 8,
+    keepAliveTimeout: 30_000,
+  },
 });
 
-const response = await client.request({
-  url: "/v1/users",
-  method: "GET",
+const core = new HyperCore({
+  customTransport: transport,
 });
 
-const users = await response.json();
+const response = await core.rest.get("/v1/users");
+console.log(response.status, response.data);
+
+await core.destroy();
 ```
 
-### Using an External (Custom) Dispatcher
+Retry, redirect, parsing, and other request policies belong to the core or its plugins rather than the transport configuration.
 
-If your application already manages a global `undici` Agent or Pool
-(e.g., for proxy configurations or Unix domain sockets), you can inject it directly:
+### External dispatcher
+
+Use an external dispatcher when your application already owns an Undici `Agent`, `Pool`, proxy dispatcher, or another compatible implementation:
 
 ```typescript
 import { Pool } from "undici";
 import { UndiciTransport } from "@hyperttp/transport-undici";
 
-const customPool = new Pool("http://localhost:3000", {
+const pool = new Pool("https://api.example.com", {
   connections: 100,
-  connect: { rejectUnauthorized: false },
 });
 
 const transport = new UndiciTransport({
-  dispatcher: customPool, // Injecting the existing instance
+  baseUrl: "https://api.example.com",
+  dispatcher: pool,
 });
 ```
 
-> ⚠️ **Note:** When a `dispatcher` is provided from an external context,
-> `transport.close()` and `transport.destroy()` calls within `hyperttp`
-> are ignored to prevent side effects in the parent environment.
-> Managing the pool lifecycle remains the responsibility of your application architecture.
+When `dispatcher` is supplied, `transport.close()` and `transport.destroy()` do not close it. The application that created the dispatcher remains responsible for its lifecycle:
 
-## 🛠 Abort & Timeout Architecture
+```typescript
+await pool.close();
+```
 
-The transport utilizes an atomic `combineSignal` utility that couples the user's external
-`AbortSignal` with an internal task-limiting timer:
+## Configuration
 
-1. **Dispatch Handler Level**: During the `onResponseData` streaming phase, if the abort signal gets triggered,
-   the underlying socket is immediately terminated via `controller.abort()`.
-2. **Error Policy Level**:
-   Low-level header timeouts (`UND_ERR_HEADERS_TIMEOUT`) and body timeouts (`UND_ERR_BODY_TIMEOUT`)
-   are gracefully normalized into standard `AbortError` instances while preserving the original `cause` for diagnostics.
+| Option                       | Description                                      |
+| ---------------------------- | ------------------------------------------------ |
+| `baseUrl`                    | Base URL used to resolve relative request URLs.  |
+| `dispatcher`                 | Externally managed Undici dispatcher.            |
+| `network.maxConcurrent`      | Maximum connections per generated pool.          |
+| `network.pipelining`         | Undici pipelining depth.                         |
+| `network.keepAliveTimeout`   | Keep-alive timeout in milliseconds.              |
+| `network.rejectUnauthorized` | Enables or disables TLS certificate validation.  |
+| `network.cache`              | Optional response-cache settings.                |
+| `network.cookieCache`        | Optional cookie-cache settings.                  |
+| `stealth`                    | TLS profile, HTTP/2, and fragmentation settings. |
 
-## 📄 License
+## License
 
-MIT
+MIT © dirold2

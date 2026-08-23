@@ -2,6 +2,32 @@
 
 All notable changes to `@hyperttp/transport-undici` will be documented in this file.
 
+## [0.3.0] - 2026-08-23
+
+### Added
+
+- Added the `rest` protocol declaration and `supports()` capability check required by the `@hyperttp/core@2` transport contract.
+- Added package-owned types for stealth settings, cache options, and raw response payloads.
+
+### Changed
+
+- **Breaking:** aligned the transport with `@hyperttp/types@^0.3.0`; `execute()` now returns the raw response body stream instead of transport-level `json()` and `text()` helpers.
+- **Breaking:** moved retry, redirect, timeout, and response parsing policies out of the transport and into `@hyperttp/core` or its plugins.
+- Requests sent through an external Undici `Dispatcher` now include the target origin, allowing dispatchers that are not bound to a single origin.
+- Replaced the URL `CacheManager` with a bounded in-memory fast-path cache.
+- Updated peer dependencies to `@hyperttp/types@^0.3.0`, `hcacher@^0.2.0`, and `undici@^8.10.0`.
+- Reworked the English and Russian documentation for the `@hyperttp/core@2` API and refreshed benchmark results.
+
+### Fixed
+
+- Pre-aborted requests now return a rejected promise instead of throwing synchronously.
+- Decompressed responses no longer mutate Undici's original headers object when removing `content-encoding`.
+- Improved header normalization for flat header arrays, cookies, and multiple `set-cookie` values.
+
+### Removed
+
+- Removed the internal `_raw` response extension and transport-level parsed-body helpers.
+
 ## [0.2.5] - 2026-07-18
 
 ### Added

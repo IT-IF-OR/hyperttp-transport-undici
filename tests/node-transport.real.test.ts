@@ -7,18 +7,21 @@ import {
 import { once } from "node:events";
 
 import { UndiciTransport } from "../src/index.js";
-import type { TransportRequest } from "@hyperttp/types";
+import type { TransportRequest, TransportResponse } from "@hyperttp/types";
 
 const BASE_URL = "http://127.0.0.1:3099";
 
 function makeRequest(
   req: Partial<TransportRequest> & { url: string },
 ): TransportRequest {
+  const { protocol = "rest", ...request } = req;
+
   return {
     method: "GET",
     headers: {},
-    ...req,
-  } as TransportRequest;
+    ...request,
+    protocol,
+  };
 }
 
 function json(res: ServerResponse, status: number, data: unknown): void {
@@ -26,6 +29,14 @@ function json(res: ServerResponse, status: number, data: unknown): void {
     "content-type": "application/json; charset=utf-8",
   });
   res.end(JSON.stringify(data));
+}
+
+async function readBody(response: TransportResponse): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of response.body as AsyncIterable<Buffer>) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function startTestServer() {
@@ -41,18 +52,6 @@ async function startTestServer() {
       if (url.pathname === "/text") {
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
         res.end("hello text");
-        return;
-      }
-
-      if (url.pathname === "/empty-json") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end("");
-        return;
-      }
-
-      if (url.pathname === "/invalid-json") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end("{not valid json}");
         return;
       }
 
@@ -76,34 +75,6 @@ async function startTestServer() {
         return;
       }
 
-      if (url.pathname === "/retry-once") {
-        const current = Number(url.searchParams.get("n") ?? "0");
-        if (current < 1) {
-          res.writeHead(503, { "content-type": "application/json" });
-          res.end(JSON.stringify({ retry: true }));
-          return;
-        }
-        json(res, 200, { retry: false });
-        return;
-      }
-
-      if (url.pathname === "/redirect") {
-        res.writeHead(302, { location: "/json" });
-        res.end();
-        return;
-      }
-
-      if (url.pathname === "/redirect-post") {
-        res.writeHead(302, { location: "/json" });
-        res.end();
-        return;
-      }
-
-      if (url.pathname === "/echo-method") {
-        json(res, 200, { method: req.method });
-        return;
-      }
-
       if (url.pathname === "/not-found") {
         json(res, 404, { error: "Not Found" });
         return;
@@ -122,7 +93,7 @@ async function startTestServer() {
   return server;
 }
 
-describe("NodeTransport (real pool)", () => {
+describe("UndiciTransport (real pool)", () => {
   let server: Awaited<ReturnType<typeof startTestServer>>;
   let transport: UndiciTransport;
 
@@ -143,21 +114,21 @@ describe("NodeTransport (real pool)", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  it("executes GET and parses JSON", async () => {
+  it("executes GET and exposes the raw JSON body", async () => {
     const response = await transport.execute(makeRequest({ url: "/json" }));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    expect(JSON.parse(await readBody(response))).toEqual({
       ok: true,
       path: "/json",
     });
   });
 
-  it("returns text", async () => {
+  it("returns raw text body", async () => {
     const response = await transport.execute(makeRequest({ url: "/text" }));
 
     expect(response.status).toBe(200);
-    expect(await response.text()).toBe("hello text");
+    expect(await readBody(response)).toBe("hello text");
   });
 
   it("passes headers through", async () => {
@@ -169,7 +140,7 @@ describe("NodeTransport (real pool)", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ header: "abc123" });
+    expect(JSON.parse(await readBody(response))).toEqual({ header: "abc123" });
   });
 
   it("sends POST body", async () => {
@@ -182,27 +153,10 @@ describe("NodeTransport (real pool)", () => {
     );
 
     expect(response.status).toBe(201);
-    expect(await response.json()).toEqual({
+    expect(JSON.parse(await readBody(response))).toEqual({
       method: "POST",
       body: JSON.stringify({ foo: "bar" }),
     });
-  });
-
-  it("returns null for empty JSON", async () => {
-    const response = await transport.execute(
-      makeRequest({ url: "/empty-json" }),
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toBeNull();
-  });
-
-  it("throws on invalid JSON", async () => {
-    const response = await transport.execute(
-      makeRequest({ url: "/invalid-json" }),
-    );
-
-    await expect(response.json()).rejects.toBeInstanceOf(SyntaxError);
   });
 
   it("returns 404 as a normal response", async () => {
@@ -211,34 +165,8 @@ describe("NodeTransport (real pool)", () => {
     );
 
     expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({
+    expect(JSON.parse(await readBody(response))).toEqual({
       error: "Not Found",
-    });
-  });
-
-  it("follows redirects", async () => {
-    const response = await transport.execute(makeRequest({ url: "/redirect" }));
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      ok: true,
-      path: "/json",
-    });
-  });
-
-  it("changes POST to GET on 302 redirect", async () => {
-    const response = await transport.execute(
-      makeRequest({
-        url: "/redirect-post",
-        method: "POST",
-        body: "abc",
-      }),
-    );
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      ok: true,
-      path: "/json",
     });
   });
 
@@ -274,7 +202,7 @@ describe("NodeTransport (real pool)", () => {
     const response = await transport.execute(makeRequest({ url: "/json" }));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    expect(JSON.parse(await readBody(response))).toEqual({
       ok: true,
       path: "/json",
     });
