@@ -6,12 +6,7 @@ const LARGE_PAYLOAD = JSON.stringify({
   payload: randomBytes(1024 * 512).toString("hex"),
 });
 
-function send(
-  res: http.ServerResponse,
-  data: string,
-  contentType: string,
-  status = 200,
-) {
+function send(res: http.ServerResponse, data: string, contentType: string, status = 200) {
   res.statusCode = status;
   res.setHeader("Content-Type", contentType);
   res.end(data);
@@ -108,11 +103,7 @@ export function createBenchmarkServer() {
     }
 
     if (pathname === "/get") {
-      return send(
-        res,
-        `ok method=${method} query=${parsedUrl.search}`,
-        "text/plain",
-      );
+      return send(res, `ok method=${method} query=${parsedUrl.search}`, "text/plain");
     }
 
     if (pathname === "/post" && method === "POST") {

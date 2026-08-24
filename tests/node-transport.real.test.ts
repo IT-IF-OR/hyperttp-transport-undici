@@ -1,9 +1,5 @@
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
-import {
-  createServer,
-  type IncomingMessage,
-  type ServerResponse,
-} from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 
 import { UndiciTransport } from "../src/index.js";
@@ -11,9 +7,7 @@ import type { TransportRequest, TransportResponse } from "@hyperttp/types";
 
 const BASE_URL = "http://127.0.0.1:3099";
 
-function makeRequest(
-  req: Partial<TransportRequest> & { url: string },
-): TransportRequest {
+function makeRequest(req: Partial<TransportRequest> & { url: string }): TransportRequest {
   const { protocol = "rest", ...request } = req;
 
   return {
@@ -40,49 +34,47 @@ async function readBody(response: TransportResponse): Promise<string> {
 }
 
 async function startTestServer() {
-  const server = createServer(
-    async (req: IncomingMessage, res: ServerResponse) => {
-      const url = new URL(req.url ?? "/", BASE_URL);
+  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const url = new URL(req.url ?? "/", BASE_URL);
 
-      if (url.pathname === "/json") {
-        json(res, 200, { ok: true, path: url.pathname });
-        return;
-      }
+    if (url.pathname === "/json") {
+      json(res, 200, { ok: true, path: url.pathname });
+      return;
+    }
 
-      if (url.pathname === "/text") {
-        res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-        res.end("hello text");
-        return;
-      }
+    if (url.pathname === "/text") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end("hello text");
+      return;
+    }
 
-      if (url.pathname === "/headers") {
-        const custom = req.headers["x-custom"];
-        json(res, 200, { header: custom ?? null });
-        return;
-      }
+    if (url.pathname === "/headers") {
+      const custom = req.headers["x-custom"];
+      json(res, 200, { header: custom ?? null });
+      return;
+    }
 
-      if (url.pathname === "/post") {
-        let body = "";
-        for await (const chunk of req) body += String(chunk);
-        json(res, 201, { method: req.method, body });
-        return;
-      }
+    if (url.pathname === "/post") {
+      let body = "";
+      for await (const chunk of req) body += String(chunk);
+      json(res, 201, { method: req.method, body });
+      return;
+    }
 
-      if (url.pathname === "/slow") {
-        setTimeout(() => {
-          json(res, 200, { slow: true });
-        }, 200);
-        return;
-      }
+    if (url.pathname === "/slow") {
+      setTimeout(() => {
+        json(res, 200, { slow: true });
+      }, 200);
+      return;
+    }
 
-      if (url.pathname === "/not-found") {
-        json(res, 404, { error: "Not Found" });
-        return;
-      }
+    if (url.pathname === "/not-found") {
+      json(res, 404, { error: "Not Found" });
+      return;
+    }
 
-      json(res, 200, { path: url.pathname });
-    },
-  );
+    json(res, 200, { path: url.pathname });
+  });
 
   server.requestTimeout = 10_000;
   server.headersTimeout = 10_000;
@@ -160,9 +152,7 @@ describe("UndiciTransport (real pool)", () => {
   });
 
   it("returns 404 as a normal response", async () => {
-    const response = await transport.execute(
-      makeRequest({ url: "/not-found" }),
-    );
+    const response = await transport.execute(makeRequest({ url: "/not-found" }));
 
     expect(response.status).toBe(404);
     expect(JSON.parse(await readBody(response))).toEqual({

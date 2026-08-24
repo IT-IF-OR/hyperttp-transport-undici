@@ -2,6 +2,12 @@
 
 All notable changes to `@hyperttp/transport-undici` will be documented in this file.
 
+## [0.3.1] - 2026-08-24
+
+### Fixed
+
+- Normalized uncompressed Undici response bodies from Node.js `Readable` to Web `ReadableStream<Uint8Array>` in `execute()` and `rawRequest()`, so `stream: true` requests preserve streaming for `@hyperttp/core` clients.
+
 ## [0.3.0] - 2026-08-23
 
 ### Added

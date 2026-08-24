@@ -10,9 +10,7 @@ describe("UndiciTransport - Internal Configuration & Mocking", () => {
   let transport: UndiciTransport;
   let originalDispatcher: ReturnType<typeof getGlobalDispatcher>;
 
-  const makeRequest = (
-    req: Partial<TransportRequest> & { url: string },
-  ): TransportRequest => {
+  const makeRequest = (req: Partial<TransportRequest> & { url: string }): TransportRequest => {
     const { protocol = "rest", ...request } = req;
 
     return {
@@ -42,10 +40,7 @@ describe("UndiciTransport - Internal Configuration & Mocking", () => {
   });
 
   it("passes correct dispatch options to the external dispatcher", async () => {
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/dispatch-check", method: "POST" })
-      .reply(200, "ok");
+    mockAgent.get(BASE_URL).intercept({ path: "/dispatch-check", method: "POST" }).reply(200, "ok");
 
     const signal = new AbortController().signal;
     const dispatchSpy = vi.spyOn(mockAgent, "dispatch");
@@ -77,10 +72,7 @@ describe("UndiciTransport - Internal Configuration & Mocking", () => {
   });
 
   it("preserves query strings in the dispatched path", async () => {
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/search?q=1&lang=ru" })
-      .reply(200, "ok");
+    mockAgent.get(BASE_URL).intercept({ path: "/search?q=1&lang=ru" }).reply(200, "ok");
 
     const dispatchSpy = vi.spyOn(mockAgent, "dispatch");
     await transport.execute(makeRequest({ url: "/search?q=1&lang=ru" }));

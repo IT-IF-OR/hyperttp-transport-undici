@@ -20,9 +20,7 @@ describe("UndiciTransport - Neutral Contract", () => {
   let transport: UndiciTransport;
   let originalDispatcher: ReturnType<typeof getGlobalDispatcher>;
 
-  const makeRequest = (
-    req: Partial<TransportRequest> & { url: string },
-  ): TransportRequest => {
+  const makeRequest = (req: Partial<TransportRequest> & { url: string }): TransportRequest => {
     const { protocol = "rest", ...request } = req;
 
     return {
@@ -69,30 +67,20 @@ describe("UndiciTransport - Neutral Contract", () => {
   });
 
   it("returns raw text body", async () => {
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/text" })
-      .reply(200, "plain text body");
+    mockAgent.get(BASE_URL).intercept({ path: "/text" }).reply(200, "plain text body");
     const response = await transport.execute(makeRequest({ url: "/text" }));
     expect(await readBody(response)).toBe("plain text body");
   });
 
   it("returns empty string for empty body", async () => {
     mockAgent.get(BASE_URL).intercept({ path: "/empty-text" }).reply(200, "");
-    const response = await transport.execute(
-      makeRequest({ url: "/empty-text" }),
-    );
+    const response = await transport.execute(makeRequest({ url: "/empty-text" }));
     expect(await readBody(response)).toBe("");
   });
 
   it("does not parse the body (invalid JSON is returned raw)", async () => {
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/invalid-json" })
-      .reply(200, "{invalid json");
-    const response = await transport.execute(
-      makeRequest({ url: "/invalid-json" }),
-    );
+    mockAgent.get(BASE_URL).intercept({ path: "/invalid-json" }).reply(200, "{invalid json");
+    const response = await transport.execute(makeRequest({ url: "/invalid-json" }));
     expect(await readBody(response)).toBe("{invalid json");
   });
 
@@ -100,13 +88,9 @@ describe("UndiciTransport - Neutral Contract", () => {
     mockAgent
       .get(BASE_URL)
       .intercept({ path: "/headers" })
-      .reply(
-        200,
-        JSON.stringify({ ok: true }),
-        {
-          headers: { "X-Test": "hello", "Content-Type": "application/json" },
-        },
-      );
+      .reply(200, JSON.stringify({ ok: true }), {
+        headers: { "X-Test": "hello", "Content-Type": "application/json" },
+      });
 
     const response = await transport.execute(makeRequest({ url: "/headers" }));
     expect(response.headers["x-test"]).toBe("hello");
@@ -154,8 +138,7 @@ describe("UndiciTransport - Neutral Contract", () => {
       .intercept({
         path: "/buffer",
         method: "POST",
-        body: (body: unknown) =>
-          Buffer.from(body as string).toString() === "hello",
+        body: (body: unknown) => Buffer.from(body as string).toString() === "hello",
       })
       .reply(200, "ok");
 
@@ -170,10 +153,7 @@ describe("UndiciTransport - Neutral Contract", () => {
   });
 
   it("supports Readable stream body", async () => {
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/stream", method: "POST" })
-      .reply(200, "ok");
+    mockAgent.get(BASE_URL).intercept({ path: "/stream", method: "POST" }).reply(200, "ok");
     const response = await transport.execute(
       makeRequest({
         url: "/stream",
@@ -189,9 +169,7 @@ describe("UndiciTransport - Neutral Contract", () => {
       .get(BASE_URL)
       .intercept({ path: "/not-found" })
       .reply(404, JSON.stringify({ error: "Not Found" }));
-    const response = await transport.execute(
-      makeRequest({ url: "/not-found" }),
-    );
+    const response = await transport.execute(makeRequest({ url: "/not-found" }));
     expect(response.status).toBe(404);
     expect(JSON.parse(await readBody(response))).toEqual({
       error: "Not Found",
@@ -199,38 +177,40 @@ describe("UndiciTransport - Neutral Contract", () => {
   });
 
   it("supports relative and absolute URLs", async () => {
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/relative" })
-      .reply(200, "ok");
+    mockAgent.get(BASE_URL).intercept({ path: "/relative" }).reply(200, "ok");
     const res1 = await transport.execute(makeRequest({ url: "/relative" }));
     expect(res1.status).toBe(200);
 
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/absolute" })
-      .reply(200, "ok");
-    const res2 = await transport.execute(
-      makeRequest({ url: `${BASE_URL}/absolute` }),
-    );
+    mockAgent.get(BASE_URL).intercept({ path: "/absolute" }).reply(200, "ok");
+    const res2 = await transport.execute(makeRequest({ url: `${BASE_URL}/absolute` }));
     expect(res2.status).toBe(200);
   });
 
-  it("exposes body as readable stream", async () => {
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/stream-response" })
-      .reply(200, "hello world");
-    const response = await transport.execute(
-      makeRequest({ url: "/stream-response" }),
-    );
+  it("exposes body as a Web ReadableStream", async () => {
+    mockAgent.get(BASE_URL).intercept({ path: "/stream-response" }).reply(200, "hello world");
+    const response = await transport.execute(makeRequest({ url: "/stream-response" }));
+    const body = response.body as ReadableStream<Uint8Array>;
 
-    expect(response.body).toBeInstanceOf(Readable);
-    const chunks: Buffer[] = [];
-    for await (const chunk of response.body as AsyncIterable<Buffer>) {
-      chunks.push(Buffer.from(chunk));
-    }
-    expect(Buffer.concat(chunks).toString("utf8")).toBe("hello world");
+    expect(body).not.toBeInstanceOf(Readable);
+    expect(typeof body.getReader).toBe("function");
+
+    const reader = body.getReader();
+    const { value, done } = await reader.read();
+    expect(done).toBe(false);
+    expect(new TextDecoder().decode(value)).toBe("hello world");
+  });
+
+  it("normalizes rawRequest body to a Web ReadableStream", async () => {
+    mockAgent.get(BASE_URL).intercept({ path: "/raw-stream" }).reply(200, "hello raw");
+    const response = await transport.rawRequest("/raw-stream", "GET");
+    const body = response.body as ReadableStream<Uint8Array>;
+
+    expect(body).not.toBeInstanceOf(Readable);
+    expect(typeof body.getReader).toBe("function");
+
+    const { value, done } = await body.getReader().read();
+    expect(done).toBe(false);
+    expect(new TextDecoder().decode(value)).toBe("hello raw");
   });
 
   it("propagates dispatcher errors", async () => {
@@ -238,9 +218,9 @@ describe("UndiciTransport - Neutral Contract", () => {
       .get(BASE_URL)
       .intercept({ path: "/socket-error" })
       .replyWithError(new Error("socket exploded"));
-    await expect(
-      transport.execute(makeRequest({ url: "/socket-error" })),
-    ).rejects.toThrow("socket exploded");
+    await expect(transport.execute(makeRequest({ url: "/socket-error" }))).rejects.toThrow(
+      "socket exploded",
+    );
   });
 
   it("supports AbortSignal cancellation", async () => {
@@ -269,17 +249,11 @@ describe("UndiciTransport - Neutral Contract", () => {
   });
 
   it("can execute many concurrent requests", async () => {
-    mockAgent
-      .get(BASE_URL)
-      .intercept({ path: "/concurrent" })
-      .reply(200, "ok")
-      .persist();
+    mockAgent.get(BASE_URL).intercept({ path: "/concurrent" }).reply(200, "ok").persist();
 
     const total = 100;
     const results = await Promise.all(
-      Array.from({ length: total }, () =>
-        transport.execute(makeRequest({ url: "/concurrent" })),
-      ),
+      Array.from({ length: total }, () => transport.execute(makeRequest({ url: "/concurrent" }))),
     );
 
     expect(results).toHaveLength(total);

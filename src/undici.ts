@@ -100,6 +100,20 @@ function applyStealthHeaders(
   return headers;
 }
 
+function toTransportStream(
+  body: Readable,
+): ReadableStream<Uint8Array> & TransportStreamExtensions {
+  const bodyWeb = Readable.toWeb(body) as ReadableStream<Uint8Array> & TransportStreamExtensions;
+  bodyWeb.dump = async (): Promise<void> => {
+    try {
+      await bodyWeb.cancel();
+    } catch {
+      // The stream may already be locked or closed.
+    }
+  };
+  return bodyWeb;
+}
+
 export class UndiciTransport implements HyperTransport {
   public readonly protocols = ["rest"] as const;
   public config: UndiciTransportConfig;
@@ -241,17 +255,11 @@ export class UndiciTransport implements HyperTransport {
         };
       }
 
-      const nodeBody = response.body;
-      (nodeBody as TransportStreamExtensions).dump = () => {
-        nodeBody.destroy();
-        return Promise.resolve();
-      };
-
       return {
         status: response.statusCode,
         headers: responseHeaders,
         url: parsed.fullUrl,
-        body: nodeBody as unknown as TransportResponsePayload,
+        body: toTransportStream(response.body),
       };
     });
   }
@@ -278,17 +286,11 @@ export class UndiciTransport implements HyperTransport {
     }
 
     return pool.request(options).then((response) => {
-      const nodeBody = response.body;
-      (nodeBody as TransportStreamExtensions).dump = () => {
-        nodeBody.destroy();
-        return Promise.resolve();
-      };
-
       return {
         status: response.statusCode,
         headers: response.headers as Record<string, string | string[]>,
         url: parsed.fullUrl,
-        body: nodeBody as unknown as TransportResponsePayload,
+        body: toTransportStream(response.body),
       };
     });
   }

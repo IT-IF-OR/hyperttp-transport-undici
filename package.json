@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/transport-undici",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "High-performance, extensible HTTP client for undici",
   "type": "module",
   "exports": {
