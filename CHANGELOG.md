@@ -2,6 +2,22 @@
 
 All notable changes to `@hyperttp/transport-undici` will be documented in this file.
 
+## [0.4.0] — 2026-10-14
+
+### Changed
+
+- **Breaking:** `execute()` now buffers non-streaming response bodies and returns them as `Uint8Array`; set `stream: true` to receive a `ReadableStream<Uint8Array>`.
+- Switched streaming response decompression to native Node.js `Readable` transforms, avoiding Web/Node stream conversion overhead.
+- Send request headers to Undici as flat header arrays, preserving normalized header values.
+- Improved `close()` and `destroy()` lifecycle handling for dispatchers and pooled connections.
+- Updated peer dependencies to `@hyperttp/types@^0.4.2` and `undici@^8.12.1`.
+- Updated development tooling: `oxfmt@^0.73.0` and `oxlint@^1.88.0`.
+
+### Fixed
+
+- Removed `content-encoding` from response headers after a compressed response is decoded in both buffered and streaming modes.
+- Prevented connector error and success handlers from invoking their callback more than once.
+
 ## [0.3.2] - 2026-08-27
 
 ### Changed

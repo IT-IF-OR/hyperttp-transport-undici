@@ -7,7 +7,11 @@ import type { TransportRequest, TransportResponse } from "@hyperttp/types";
 const BASE_URL = "http://localhost:3000";
 
 async function readBody(response: TransportResponse): Promise<string> {
-  const body = response.body as NodeJS.ReadableStream;
+  const body = response.body;
+  if (body instanceof Uint8Array) {
+    return Buffer.from(body).toString("utf8");
+  }
+
   const chunks: Buffer[] = [];
   for await (const chunk of body as AsyncIterable<Buffer>) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -20,7 +24,9 @@ describe("UndiciTransport - Neutral Contract", () => {
   let transport: UndiciTransport;
   let originalDispatcher: ReturnType<typeof getGlobalDispatcher>;
 
-  const makeRequest = (req: Partial<TransportRequest> & { url: string }): TransportRequest => {
+  const makeRequest = (
+    req: Partial<TransportRequest> & { url: string; stream?: boolean },
+  ): TransportRequest & { stream?: boolean } => {
     const { protocol = "rest", ...request } = req;
 
     return {
@@ -186,9 +192,9 @@ describe("UndiciTransport - Neutral Contract", () => {
     expect(res2.status).toBe(200);
   });
 
-  it("exposes body as a Web ReadableStream", async () => {
+  it("returns a Web ReadableStream when stream is enabled", async () => {
     mockAgent.get(BASE_URL).intercept({ path: "/stream-response" }).reply(200, "hello world");
-    const response = await transport.execute(makeRequest({ url: "/stream-response" }));
+    const response = await transport.execute(makeRequest({ url: "/stream-response", stream: true }));
     const body = response.body as ReadableStream<Uint8Array>;
 
     expect(body).not.toBeInstanceOf(Readable);
@@ -200,17 +206,13 @@ describe("UndiciTransport - Neutral Contract", () => {
     expect(new TextDecoder().decode(value)).toBe("hello world");
   });
 
-  it("normalizes rawRequest body to a Web ReadableStream", async () => {
+  it("returns rawRequest body as a Node.js Readable stream", async () => {
     mockAgent.get(BASE_URL).intercept({ path: "/raw-stream" }).reply(200, "hello raw");
     const response = await transport.rawRequest("/raw-stream", "GET");
-    const body = response.body as ReadableStream<Uint8Array>;
+    const body = response.body as NodeJS.ReadableStream;
 
-    expect(body).not.toBeInstanceOf(Readable);
-    expect(typeof body.getReader).toBe("function");
-
-    const { value, done } = await body.getReader().read();
-    expect(done).toBe(false);
-    expect(new TextDecoder().decode(value)).toBe("hello raw");
+    expect(body).toBeInstanceOf(Readable);
+    expect(await readBody(response)).toBe("hello raw");
   });
 
   it("propagates dispatcher errors", async () => {

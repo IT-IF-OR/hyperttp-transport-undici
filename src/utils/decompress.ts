@@ -35,48 +35,51 @@ function attachNoopDump(buffer: Uint8Array): Uint8Array & TransportStreamExtensi
   return payload;
 }
 
-function attachStreamDump(
-  stream: ReadableStream<Uint8Array>,
-): ReadableStream<Uint8Array> & TransportStreamExtensions {
-  const payload = stream as ReadableStream<Uint8Array> & TransportStreamExtensions;
-  payload.dump = async (): Promise<void> => {
-    try {
-      await payload.cancel();
-    } catch {
-      //
+/**
+ * Декомпрессия прямо на уровне Node Readable стрима.
+ * Исключает пинг-понг Readable.toWeb() <-> Readable.fromWeb()
+ */
+export function createDecompressNodeStream(
+  body: Readable,
+  encoding: string,
+): Readable {
+  const encodings = parseEncodings(encoding);
+  if (encodings.length === 0) return body;
+
+  let current: Readable = body;
+
+  for (let i = 0; i < encodings.length; i++) {
+    const enc = encodings[i]!;
+
+    if (enc === "gzip" || enc === "x-gzip") {
+      current = current.pipe(createGunzip());
+    } else if (enc === "deflate") {
+      current = current.pipe(createInflate());
+    } else if (enc === "br") {
+      current = current.pipe(createBrotliDecompress());
     }
-  };
-  return payload;
+  }
+
+  return current;
 }
 
-async function decompressOnceWeb(input: Uint8Array, encoding: string): Promise<Uint8Array> {
-  const enc = encoding.trim().toLowerCase();
-  if (typeof globalThis.DecompressionStream === "undefined") return input;
-
-  const format = enc === "gzip" || enc === "x-gzip" ? "gzip" : enc === "deflate" ? "deflate" : null;
-  if (!format) return input;
-
-  const blob = new Blob([input as unknown as BlobPart]);
-  const response = new Response(blob);
-  const decompressedStream = response.body!.pipeThrough(
-    new globalThis.DecompressionStream(format) as TransformStream<Uint8Array, Uint8Array>,
-  );
-
-  const buf = await new Response(decompressedStream).arrayBuffer();
-  return new Uint8Array(buf);
-}
-
-function decompressOnceNode(input: Uint8Array, encoding: string): Uint8Array {
+function decompressOnceNode(
+  input: Uint8Array,
+  encoding: string,
+): Uint8Array {
   const enc = encoding.trim().toLowerCase();
 
   switch (enc) {
     case "gzip":
     case "x-gzip":
       return gunzipSync(input);
+
     case "deflate":
       return inflateSync(input);
+
     case "br":
       return brotliDecompressSync(input);
+
     default:
       return input;
   }
@@ -92,13 +95,12 @@ export async function decompressBuffer(
   for (let i = 0; i < encodings.length; i++) {
     const enc = encodings[i]!;
 
-    const webResult = await decompressOnceWeb(current, enc);
-    if (webResult !== current) {
-      current = webResult;
-      continue;
-    }
-
-    if (enc === "br" || enc === "gzip" || enc === "deflate" || enc === "x-gzip") {
+    if (
+      enc === "br" ||
+      enc === "gzip" ||
+      enc === "deflate" ||
+      enc === "x-gzip"
+    ) {
       try {
         current = decompressOnceNode(current, enc);
       } catch {
@@ -107,47 +109,4 @@ export async function decompressBuffer(
     }
   }
   return attachNoopDump(current);
-}
-
-export function createDecompressStream(
-  body: ReadableStream<Uint8Array>,
-  encoding: string,
-): ReadableStream<Uint8Array> & TransportStreamExtensions {
-  const encodings = parseEncodings(encoding);
-  if (encodings.length === 0) return attachStreamDump(body);
-
-  let current: ReadableStream<Uint8Array> = body;
-
-  for (let i = 0; i < encodings.length; i++) {
-    const enc = encodings[i]!;
-
-    const isGzip = enc === "gzip" || enc === "x-gzip";
-    const isDeflate = enc === "deflate";
-    const isBrotli = enc === "br";
-
-    if ((isGzip || isDeflate) && typeof globalThis.DecompressionStream !== "undefined") {
-      const format = isGzip ? "gzip" : "deflate";
-      current = current.pipeThrough(
-        new globalThis.DecompressionStream(format) as TransformStream<Uint8Array, Uint8Array>,
-      );
-    } else {
-      try {
-        const nodeReadable = Readable.fromWeb(current as any);
-        let transformed = nodeReadable;
-
-        if (isGzip) {
-          transformed = nodeReadable.pipe(createGunzip());
-        } else if (isDeflate) {
-          transformed = nodeReadable.pipe(createInflate());
-        } else if (isBrotli) {
-          transformed = nodeReadable.pipe(createBrotliDecompress());
-        }
-
-        current = Readable.toWeb(transformed) as ReadableStream<Uint8Array>;
-      } catch {
-        continue;
-      }
-    }
-  }
-  return attachStreamDump(current);
 }

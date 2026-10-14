@@ -26,8 +26,13 @@ function json(res: ServerResponse, status: number, data: unknown): void {
 }
 
 async function readBody(response: TransportResponse): Promise<string> {
+  const body = response.body;
+  if (body instanceof Uint8Array) {
+    return Buffer.from(body).toString("utf8");
+  }
+
   const chunks: Buffer[] = [];
-  for await (const chunk of response.body as AsyncIterable<Buffer>) {
+  for await (const chunk of body as AsyncIterable<Buffer>) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks).toString("utf8");

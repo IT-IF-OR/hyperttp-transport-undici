@@ -19,13 +19,18 @@ import type {
   UndiciTransportConfig,
 } from "./types/index.js";
 
-import { createDecompressStream } from "./utils/decompress.js";
+import { createDecompressNodeStream, decompressBuffer } from "./utils/decompress.js";
 import { abortError, createPoolOptions, fastParseUrl, normalizeHeaders } from "./utils/helpers.js";
 
 const DEFAULT_BASE_URL = "http://localhost:3000";
 
 type UndiciPoolOptions = NonNullable<ConstructorParameters<typeof Pool>[1]>;
 type UndiciConnectorFn = Extract<NonNullable<UndiciPoolOptions["connect"]>, Function>;
+
+type ExtendedTransportRequest = TransportRequest & {
+  stealth?: StealthOptions;
+  stream?: boolean;
+};
 
 const STEALTH_HEADER_PRESETS: Record<string, Record<string, string>> = {
   chrome: {
@@ -90,7 +95,11 @@ function applyStealthHeaders(
   }
 
   const currentUA = headers["user-agent"];
-  if (currentUA === undefined || currentUA === "hyperttp/2.0" || currentUA === "Hyperttp/2.0") {
+  if (
+    currentUA === undefined ||
+    currentUA === "hyperttp/2.0" ||
+    currentUA === "Hyperttp/2.0"
+  ) {
     const browserUA = STEALTH_UA_PRESETS[presetName];
     if (browserUA) {
       headers["user-agent"] = browserUA;
@@ -104,14 +113,25 @@ function toTransportStream(
   body: Readable,
 ): ReadableStream<Uint8Array> & TransportStreamExtensions {
   const bodyWeb = Readable.toWeb(body) as ReadableStream<Uint8Array> & TransportStreamExtensions;
+
   bodyWeb.dump = async (): Promise<void> => {
     try {
       await bodyWeb.cancel();
     } catch {
-      // The stream may already be locked or closed.
+      //
     }
   };
+
   return bodyWeb;
+}
+
+
+function headersToFlatArray(headers: Record<string, string>): string[] {
+  const flat: string[] = [];
+  for (const key in headers) {
+    flat.push(key, headers[key]!);
+  }
+  return flat;
 }
 
 export class UndiciTransport implements HyperTransport {
@@ -194,7 +214,7 @@ export class UndiciTransport implements HyperTransport {
     return protocol === "rest";
   }
 
-  public execute(req: TransportRequest & { stealth?: StealthOptions }): Promise<TransportResponse> {
+  public execute(req: ExtendedTransportRequest): Promise<TransportResponse> {
     const signal = req.signal;
     if (signal?.aborted) {
       return Promise.reject(abortError(signal.reason));
@@ -224,10 +244,11 @@ export class UndiciTransport implements HyperTransport {
     const body = (req.body ?? null) as Dispatcher.DispatchOptions["body"];
     const pool = this.isExternal ? this.pool : this.getPool(parsed.origin, stealth);
 
+
     const options: Dispatcher.RequestOptions = {
       path: parsed.path,
       method: req.method,
-      headers: headers as Dispatcher.DispatchOptions["headers"],
+      headers: headersToFlatArray(headers),
       body,
       signal,
     };
@@ -235,31 +256,42 @@ export class UndiciTransport implements HyperTransport {
       options.origin = parsed.origin;
     }
 
-    return pool.request(options).then((response) => {
+    return pool.request(options).then(async (response) => {
       const responseHeaders = response.headers as Record<string, string | string[]>;
       const ce = responseHeaders["content-encoding"];
       const encoding = Array.isArray(ce) ? ce[0] : ce;
 
-      if (encoding) {
-        const bodyWeb = Readable.toWeb(response.body) as ReadableStream<Uint8Array>;
-        const decompressed = createDecompressStream(bodyWeb, encoding);
+      if (req.stream === true) {
+        let nodeBody: Readable = response.body;
 
-        const cleanedHeaders = { ...responseHeaders };
-        delete cleanedHeaders["content-encoding"];
+        if (encoding) {
+          nodeBody = createDecompressNodeStream(nodeBody, encoding);
+          delete responseHeaders["content-encoding"];
+        }
 
         return {
           status: response.statusCode,
-          headers: cleanedHeaders,
+          headers: responseHeaders,
           url: parsed.fullUrl,
-          body: decompressed as TransportResponsePayload,
+          body: toTransportStream(nodeBody),
         };
+      }
+
+      const rawBody = new Uint8Array(await response.body.arrayBuffer());
+
+      const payload = encoding
+        ? await decompressBuffer(rawBody, encoding)
+        : rawBody;
+
+      if (encoding) {
+        delete responseHeaders["content-encoding"];
       }
 
       return {
         status: response.statusCode,
         headers: responseHeaders,
         url: parsed.fullUrl,
-        body: toTransportStream(response.body),
+        body: payload as TransportResponsePayload,
       };
     });
   }
@@ -277,7 +309,7 @@ export class UndiciTransport implements HyperTransport {
     const options: Dispatcher.RequestOptions = {
       path: parsed.path,
       method,
-      headers: headers as Dispatcher.DispatchOptions["headers"],
+      headers: headers ? headersToFlatArray(normalizeHeaders(headers)) : undefined,
       body: (body ?? null) as Dispatcher.DispatchOptions["body"],
       signal,
     };
@@ -290,7 +322,7 @@ export class UndiciTransport implements HyperTransport {
         status: response.statusCode,
         headers: response.headers as Record<string, string | string[]>,
         url: parsed.fullUrl,
-        body: toTransportStream(response.body),
+        body: response.body as unknown as TransportResponsePayload,
       };
     });
   }
@@ -311,7 +343,7 @@ export class UndiciTransport implements HyperTransport {
     const options: Dispatcher.RequestOptions = {
       path: parsed.path,
       method,
-      headers: headers as Dispatcher.DispatchOptions["headers"],
+      headers: headers ? headersToFlatArray(normalizeHeaders(headers)) : undefined,
       body: null,
       signal,
     };
@@ -404,30 +436,41 @@ export class UndiciTransport implements HyperTransport {
           }
 
           return originalWrite.call(this, chunk, encoding, callbackRef);
-        } as any;
+        } as typeof socket.write;
       }
 
+      const onSocketError = (err: Error) => callback(err, null);
+
       socket.once("connect", () => {
-        const isHttps = options.protocol === "https:";
-        if (isHttps) {
+        socket.removeListener("error", onSocketError);
+        if (options.protocol === "https:") {
           const tlsSocket = tls.connect({
             host,
             port,
             socket,
             ciphers: tlsConnectOptions.ciphers,
             servername: options.servername || host,
-            ALPNProtocols: (options as any).ALPNProtocols as string[],
+            ALPNProtocols: (options as { ALPNProtocols?: string[] }).ALPNProtocols,
             rejectUnauthorized: this.config.network?.rejectUnauthorized ?? true,
           });
 
-          tlsSocket.once("error", (err) => callback(err, null));
-          tlsSocket.once("secureConnect", () => callback(null, tlsSocket));
+          const onTlsError = (err: Error) => {
+            tlsSocket.removeListener("secureConnect", onTlsSecure);
+            callback(err, null);
+          };
+          const onTlsSecure = () => {
+            tlsSocket.removeListener("error", onTlsError);
+            callback(null, tlsSocket);
+          };
+
+          tlsSocket.once("error", onTlsError);
+          tlsSocket.once("secureConnect", onTlsSecure);
         } else {
           callback(null, socket);
         }
       });
 
-      socket.once("error", (err) => callback(err, null));
+      socket.once("error", onSocketError);
     };
 
     const isCustomConnectRequired =
@@ -445,10 +488,24 @@ export class UndiciTransport implements HyperTransport {
   public async close(): Promise<void> {
     if (this.isExternal) return;
     const promises: Promise<void>[] = [];
-    if ("close" in this.pool && typeof (this.pool as any).close === "function") {
-      promises.push((this.pool as any).close());
+
+    const poolLifecycle = this.pool as Dispatcher & {
+      close?: () => Promise<void>;
+      destroy?: () => Promise<void>;
+    };
+
+    if (typeof poolLifecycle.close === "function") {
+      promises.push(poolLifecycle.close());
     }
-    for (const p of this.pools.values()) promises.push(p.close());
+
+    for (const p of this.pools.values()) {
+      if (typeof p.close === "function") {
+        promises.push(p.close());
+      } else if (typeof p.destroy === "function") {
+        promises.push(p.destroy());
+      }
+    }
+
     this.pools.clear();
     this.fastUrlCache.clear();
     this.cookieStore.clear();
@@ -460,10 +517,26 @@ export class UndiciTransport implements HyperTransport {
   public async destroy(): Promise<void> {
     if (this.isExternal) return;
     const promises: Promise<void>[] = [];
-    if ("destroy" in this.pool && typeof (this.pool as any).destroy === "function") {
-      promises.push((this.pool as any).destroy());
+
+    const poolLifecycle = this.pool as Dispatcher & {
+      close?: () => Promise<void>;
+      destroy?: () => Promise<void>;
+    };
+
+    if (typeof poolLifecycle.destroy === "function") {
+      promises.push(poolLifecycle.destroy());
+    } else if (typeof poolLifecycle.close === "function") {
+      promises.push(poolLifecycle.close());
     }
-    for (const p of this.pools.values()) promises.push(p.destroy());
+
+    for (const p of this.pools.values()) {
+      if (typeof p.destroy === "function") {
+        promises.push(p.destroy());
+      } else if (typeof p.close === "function") {
+        promises.push(p.close());
+      }
+    }
+
     this.pools.clear();
     this.fastUrlCache.clear();
     this.cookieStore.clear();

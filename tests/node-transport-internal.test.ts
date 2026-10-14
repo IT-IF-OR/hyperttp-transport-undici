@@ -59,14 +59,14 @@ describe("UndiciTransport - Internal Configuration & Mocking", () => {
       origin: string;
       path: string;
       method: string;
-      headers: Record<string, string>;
+      headers: string[];
       body: unknown;
       signal: AbortSignal;
     };
     expect(opts.origin).toBe(BASE_URL);
     expect(opts.path).toBe("/dispatch-check");
     expect(opts.method).toBe("POST");
-    expect(opts.headers).toEqual({ "x-custom": "abc" });
+    expect(opts.headers).toEqual(["x-custom", "abc"]);
     expect(opts.body).toBe("payload");
     expect(opts.signal).toBe(signal);
   });
