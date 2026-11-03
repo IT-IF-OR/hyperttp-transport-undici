@@ -18,12 +18,5 @@
     "style": "warn",
     "nursery": "off"
   },
-  "ignorePatterns": [
-    "dist",
-    "node_modules",
-    "coverage",
-    "*.d.ts",
-    "example",
-    "tests"
-  ]
+  "ignorePatterns": ["dist", "node_modules", "coverage", "*.d.ts", "example", "tests"]
 }

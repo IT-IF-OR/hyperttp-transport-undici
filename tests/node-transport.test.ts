@@ -194,7 +194,9 @@ describe("UndiciTransport - Neutral Contract", () => {
 
   it("returns a Web ReadableStream when stream is enabled", async () => {
     mockAgent.get(BASE_URL).intercept({ path: "/stream-response" }).reply(200, "hello world");
-    const response = await transport.execute(makeRequest({ url: "/stream-response", stream: true }));
+    const response = await transport.execute(
+      makeRequest({ url: "/stream-response", stream: true }),
+    );
     const body = response.body as ReadableStream<Uint8Array>;
 
     expect(body).not.toBeInstanceOf(Readable);

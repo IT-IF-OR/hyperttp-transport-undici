@@ -39,10 +39,7 @@ function attachNoopDump(buffer: Uint8Array): Uint8Array & TransportStreamExtensi
  * Декомпрессия прямо на уровне Node Readable стрима.
  * Исключает пинг-понг Readable.toWeb() <-> Readable.fromWeb()
  */
-export function createDecompressNodeStream(
-  body: Readable,
-  encoding: string,
-): Readable {
+export function createDecompressNodeStream(body: Readable, encoding: string): Readable {
   const encodings = parseEncodings(encoding);
   if (encodings.length === 0) return body;
 
@@ -63,10 +60,7 @@ export function createDecompressNodeStream(
   return current;
 }
 
-function decompressOnceNode(
-  input: Uint8Array,
-  encoding: string,
-): Uint8Array {
+function decompressOnceNode(input: Uint8Array, encoding: string): Uint8Array {
   const enc = encoding.trim().toLowerCase();
 
   switch (enc) {
@@ -95,12 +89,7 @@ export async function decompressBuffer(
   for (let i = 0; i < encodings.length; i++) {
     const enc = encodings[i]!;
 
-    if (
-      enc === "br" ||
-      enc === "gzip" ||
-      enc === "deflate" ||
-      enc === "x-gzip"
-    ) {
+    if (enc === "br" || enc === "gzip" || enc === "deflate" || enc === "x-gzip") {
       try {
         current = decompressOnceNode(current, enc);
       } catch {
