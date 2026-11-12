@@ -15,39 +15,13 @@
     "type": "git",
     "url": "git+https://github.com/IT-IF-OR/hyperttp-transport-undici.git"
   },
-  "files": [
-    "dist"
-  ],
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./index.d.ts",
+      "import": "./index.js"
     },
-    "./package.json": "./package.json"
-  },
-  "scripts": {
-    "typecheck": "tsc --noEmit",
-    "lint": "oxlint src",
-    "lint:fix": "oxlint src --fix",
-    "format": "oxfmt src",
-    "format:check": "oxfmt src --check",
-    "test": "vitest run",
-    "dev": "tsx src/index.ts",
-    "pub": "d-publish",
-    "dist": "d-dist",
-    "build": "tsc && esbuild \"dist/**/*.js\" --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
-    "clean": "node --input-type=module -e 'import { rmSync } from \"node:fs\"; rmSync(\"dist\", { recursive: true, force: true });'"
-  },
-  "devDependencies": {
-    "@dirold2/dev-tools": "^1.1.3",
-    "@types/bun": "^1.4.4",
-    "@types/node": "^26.6.6",
-    "esbuild": "^0.28.2",
-    "oxfmt": "^0.78.0",
-    "oxlint": "^1.93.0",
-    "typescript": "^7.0.2",
-    "vitest": "^5.1.0"
+    "./package.json": "././package.json"
   },
   "peerDependencies": {
     "@hyperttp/types": "^0.5.4",
@@ -58,5 +32,6 @@
     "typescript": {
       "optional": true
     }
-  }
+  },
+  "private": false
 }

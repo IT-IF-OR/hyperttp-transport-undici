@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/index.ts"],
+  "sourcesContent": ["export { UndiciTransport } from \"./undici.js\";\n"],
+  "mappings": "aAAA,OAAS,oBAAuB",
+  "names": []
+}
