@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/transport-undici",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "High-performance, extensible HTTP client for undici",
   "keywords": [
     "client",
@@ -41,16 +41,17 @@
   },
   "devDependencies": {
     "@dirold2/dev-tools": "^1.1.3",
-    "@types/bun": "^1.4.4",
+    "@hyperttp/types": "^0.5.5",
+    "@types/bun": "^1.4.5",
     "@types/node": "^26.6.6",
     "esbuild": "^0.28.2",
-    "oxfmt": "^0.78.0",
-    "oxlint": "^1.93.0",
+    "oxfmt": "^0.80.0",
+    "oxlint": "^1.95.0",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0"
   },
   "peerDependencies": {
-    "@hyperttp/types": "^0.5.4",
+    "@hyperttp/types": "^0.5.5",
     "hcacher": "^0.3.1",
     "undici": "^8.12.4"
   },

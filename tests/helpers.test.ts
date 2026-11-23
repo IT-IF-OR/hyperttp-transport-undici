@@ -1,7 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { fastParseUrl, normalizeHeaders } from "../src/utils/helpers.js";
+import { createPoolOptions, fastParseUrl, normalizeHeaders } from "../src/utils/helpers.js";
 
 describe("Pure Helper Functions", () => {
+  describe("createPoolOptions", () => {
+    it("enables HTTP/2 by default and honors the network override", () => {
+      expect(createPoolOptions({})).toMatchObject({ allowH2: true });
+      expect(createPoolOptions({ network: { http2: false } })).toMatchObject({ allowH2: false });
+    });
+  });
+
   describe("normalizeHeaders", () => {
     it("returns empty object on falsy values", () => {
       expect(normalizeHeaders(null as never)).toEqual({});

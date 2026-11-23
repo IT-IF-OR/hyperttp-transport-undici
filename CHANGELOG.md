@@ -1,6 +1,10 @@
 # Changelog
 
-All notable changes to `@hyperttp/transport-undici` will be documented in this file.
+## [0.4.3] — 2026-11-24
+
+### Changed
+
+- `http2: true` now selects `UndiciTransport` for REST traffic, using its existing `allowH2` pool support. gRPC remains unsupported.
 
 ## [0.4.0] — 2026-10-14
 

@@ -134,6 +134,8 @@ export interface UndiciTransportConfig {
   stealth?: StealthOptions;
 
   network?: {
+    /** Enables HTTP/2 (ALPN h2) for generated connection pools. Default: true. Response trailers are unavailable. */
+    http2?: boolean;
     maxConcurrent?: number;
     pipelining?: number;
     keepAliveTimeout?: number;

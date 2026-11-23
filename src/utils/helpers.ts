@@ -13,7 +13,7 @@ export function createPoolOptions(config: UndiciTransportConfig): PoolOptions {
     connections: net?.maxConcurrent ?? 500,
     pipelining: net?.pipelining ?? 8,
     keepAliveTimeout: net?.keepAliveTimeout ?? 30000,
-    allowH2: config.stealth?.http2 ?? true,
+    allowH2: net?.http2 ?? config.stealth?.http2 ?? true,
   };
 }
 
