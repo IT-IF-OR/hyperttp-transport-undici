@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/index.ts"],
+  "sourcesContent": ["declare module \"@hyperttp/types\" {\n  interface HyperClientOptions {\n    /** Prefer HTTP/2 transport selection for REST and gRPC without modifying global fetch. */\n    http2?: boolean;\n  }\n}\n\nexport { UndiciTransport } from \"./undici.js\";\n"],
+  "mappings": "aAOA,OAAS,oBAAuB",
+  "names": []
+}
